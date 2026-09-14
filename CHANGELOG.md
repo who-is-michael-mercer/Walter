@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.1 — 2026-09-14
+
+### Changed
+
+- Renamed the Manager identity from `Agent Manager` to **Walter**.
+- Updated Codex entry instructions, charter, system prompt, and README to use Walter as the agent/product name while retaining `Manager` as the functional role.
+- Standardized the recommended local installation path as `~/Projects/Walter`.
+
 ## 1.0.0 — 2026-09-14
 
 Initial v1 specification.

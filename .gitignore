@@ -1,0 +1,12 @@
+# Runtime-local state
+.env
+.env.*
+*.log
+.DS_Store
+__pycache__/
+.venv/
+node_modules/
+
+# Local orchestration scratch
+.local/
+scratch/

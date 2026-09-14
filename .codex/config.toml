@@ -1,0 +1,8 @@
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 4
+interrupt_message = true
+
+# Agent Manager uses dynamic task packets to define the exact specialist lane.
+# These defaults keep the parent capable while project-scoped custom agents
+# provide reusable execution/review/scoping/adjudication archetypes.

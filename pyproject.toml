@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "walter-manager"
+version = "0.1.0"
+description = "Walter general-purpose orchestration Manager runtime for the OpenAI Agents SDK"
+requires-python = ">=3.11"
+dependencies = [
+  "openai-agents",
+  "pydantic>=2",
+  "python-dotenv>=1",
+]
+
+[project.scripts]
+walter = "walter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

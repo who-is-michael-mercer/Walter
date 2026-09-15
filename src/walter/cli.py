@@ -5,7 +5,7 @@ import asyncio
 import os
 from pathlib import Path
 
-from agents import Runner, SQLiteSession, trace
+from agents import RunConfig, Runner, SQLiteSession, trace
 from dotenv import load_dotenv
 
 from .runtime import build_walter
@@ -78,6 +78,9 @@ async def _execute(
     max_turns: int,
 ):
     metadata = {"runtime": "agents-sdk", "manager": "Walter"}
+    include_sensitive = (
+        os.getenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "0") == "1"
+    )
     with trace(
         "Walter orchestration",
         group_id=session_id,
@@ -88,6 +91,9 @@ async def _execute(
             goal,
             session=session,
             max_turns=max_turns,
+            run_config=RunConfig(
+                trace_include_sensitive_data=include_sensitive,
+            ),
         )
     return result, workflow_trace.trace_id
 

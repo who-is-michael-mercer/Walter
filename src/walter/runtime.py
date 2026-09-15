@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from agents import Agent, Runner, WebSearchTool
+from agents import Agent, RunConfig, Runner, WebSearchTool
 from agents.decorators import tool
 
 from .contracts import TaskPacket, ToolPolicy, WorkerResult
@@ -110,6 +110,11 @@ def _tools_for(policy: ToolPolicy) -> list:
     return []
 
 
+def _trace_sensitive_enabled() -> bool:
+    value = os.getenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "0")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @tool
 async def delegate_task(packet: TaskPacket) -> WorkerResult:
     """Create one temporary least-privilege specialist and return its structured result."""
@@ -129,6 +134,9 @@ async def delegate_task(packet: TaskPacket) -> WorkerResult:
             f"{packet.model_dump_json(indent=2)}"
         ),
         max_turns=8,
+        run_config=RunConfig(
+            trace_include_sensitive_data=_trace_sensitive_enabled(),
+        ),
     )
 
     output = result.final_output

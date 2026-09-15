@@ -70,13 +70,22 @@ def _walter_instructions() -> str:
     return f"{prompt_path.read_text(encoding='utf-8').strip()}\n\n{RUNTIME_APPENDIX}"
 
 
-def _agent(name: str, instructions: str, *, output_type=None, model_env: str | None = None):
+def _agent(
+    name: str,
+    instructions: str,
+    *,
+    output_type=None,
+    tools=None,
+    model_env: str | None = None,
+):
     kwargs = {
         "name": name,
         "instructions": instructions,
     }
     if output_type is not None:
         kwargs["output_type"] = output_type
+    if tools is not None:
+        kwargs["tools"] = tools
     if model_env:
         model = os.getenv(model_env)
         if model:
@@ -119,5 +128,6 @@ def build_walter() -> Agent:
     return _agent(
         name="Walter",
         instructions=_walter_instructions(),
+        tools=[delegate_task],
         model_env="WALTER_MODEL",
-    ).clone(tools=[delegate_task])
+    )

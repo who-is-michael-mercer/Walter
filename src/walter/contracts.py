@@ -5,6 +5,9 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+ToolPolicy = Literal["model_only", "web_search"]
+
+
 class TaskPacket(BaseModel):
     """The minimum-sufficient assignment Walter gives one temporary specialist."""
 
@@ -35,11 +38,11 @@ class TaskPacket(BaseModel):
     stop_condition: str = Field(
         description="Condition telling the worker when its lane is complete or genuinely blocked."
     )
-    tool_policy: Literal["model_only"] = Field(
+    tool_policy: ToolPolicy = Field(
         default="model_only",
         description=(
-            "Tools granted to this worker. The initial runtime intentionally supports only "
-            "model reasoning and structured output."
+            "Least-privilege capability set granted to this worker. Use web_search only when "
+            "fresh external evidence is required; otherwise use model_only."
         ),
     )
 
@@ -47,6 +50,14 @@ class TaskPacket(BaseModel):
 class CriterionCheck(BaseModel):
     criterion: str
     passed: bool
+    note: str = ""
+
+
+class SourceReference(BaseModel):
+    """A source a specialist actually used to support its deliverable."""
+
+    title: str = ""
+    url: str
     note: str = ""
 
 
@@ -58,6 +69,10 @@ class WorkerResult(BaseModel):
     summary: str
     deliverable: str
     evidence: list[str] = Field(default_factory=list)
+    sources: list[SourceReference] = Field(
+        default_factory=list,
+        description="External sources actually used. Empty for model-only work.",
+    )
     assumptions: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
     acceptance_check: list[CriterionCheck] = Field(default_factory=list)

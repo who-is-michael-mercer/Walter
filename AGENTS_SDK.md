@@ -34,26 +34,40 @@ python -m pip install -e .
 The editable install is intentional: this first runtime reads Walter's canonical
 `SYSTEM_PROMPT.md` directly from the repository checkout.
 
-## 4. Configure the API key
+## 4. Configure the OpenRouter API key
 
-If `OPENAI_API_KEY` is already exported in your shell, nothing else is required.
+Walter requires an OpenRouter key. If `OPENROUTER_API_KEY` is already exported in your shell,
+nothing else is required.
 
 Alternatively create a local `.env` file in the repository root:
 
 ```text
-OPENAI_API_KEY=your_key_here
+# Required: OpenRouter API key (never commit a real key).
+OPENROUTER_API_KEY=your_openrouter_key_here
+WALTER_MODEL_PROVIDER=openrouter
+
+# Optional model and endpoint overrides.
+WALTER_MODEL=moonshotai/kimi-k3
+WALTER_WORKER_MODEL=moonshotai/kimi-k3
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 ```
 
 `.env` is gitignored. Never commit the key.
 
-Optional model overrides:
+The default endpoint is `https://openrouter.ai/api/v1`; override it with
+`OPENROUTER_BASE_URL` when using a compatible OpenRouter endpoint. Both manager and worker
+models are constructed explicitly with `AsyncOpenAI` and `OpenAIChatCompletionsModel`.
+Walter never falls back to the OpenAI default client. SDK tracing is disabled, and the model's
+reasoning replay hook is enabled so OpenRouter `reasoning_content` survives tool-call turns.
 
-```text
-WALTER_MODEL=your_manager_model
-WALTER_WORKER_MODEL=your_worker_model
+For a local configuration template:
+
+```bash
+cp .env.example .env
 ```
 
-If those variables are omitted, the Agents SDK's configured/default OpenAI model is used.
+Run credit-free tests with `python -m pytest -q`. The optional live smoke test requires an
+explicit opt-in: `WALTER_LIVE_SMOKE=1 python -m pytest -q -m live`.
 
 ## 5. Start Walter
 

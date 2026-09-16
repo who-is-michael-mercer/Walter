@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
-from agents import Agent, RunConfig, Runner, WebSearchTool
+from agents import Agent, OpenAIChatCompletionsModel, RunConfig, Runner, WebSearchTool, set_tracing_disabled
 from agents.decorators import tool
+from openai import AsyncOpenAI
 
 from .contracts import TaskPacket, ToolPolicy, WorkerResult
 
@@ -67,6 +72,117 @@ reviewer, or replan. Do not rewrite or finish a failed specialist deliverable pe
 """.strip()
 
 
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_MANAGER_MODEL = "moonshotai/kimi-k3"
+DEFAULT_WORKER_MODEL = "moonshotai/kimi-k3"
+
+
+class RuntimeConfigurationError(ValueError):
+    """Raised when Walter's provider configuration is missing or invalid."""
+
+
+def _normalize_base_url(value: str) -> str:
+    return value.strip().rstrip("/")
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    """Provider-neutral runtime settings resolved from the environment."""
+
+    provider: str
+    api_key: str
+    base_url: str
+    manager_model: str
+    worker_model: str
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "RuntimeConfig":
+        values = os.environ if env is None else env
+        provider = values.get(
+            "WALTER_MODEL_PROVIDER",
+            values.get("WALTER_PROVIDER", "openrouter"),
+        ).strip().lower()
+        if provider != "openrouter":
+            raise RuntimeConfigurationError(
+                f"Unsupported WALTER_MODEL_PROVIDER={provider!r}; only 'openrouter' is supported."
+            )
+
+        api_key = values.get("OPENROUTER_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeConfigurationError(
+                "OPENROUTER_API_KEY is not set. Add it to the environment or a local .env file."
+            )
+
+        base_url = _normalize_base_url(
+            values.get("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL)
+        )
+        parsed = urlparse(base_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise RuntimeConfigurationError(
+                "OPENROUTER_BASE_URL must be an absolute HTTPS URL."
+            )
+
+        manager_model = values.get("WALTER_MODEL", DEFAULT_MANAGER_MODEL).strip()
+        worker_model = values.get("WALTER_WORKER_MODEL", DEFAULT_WORKER_MODEL).strip()
+        if not manager_model or not worker_model:
+            raise RuntimeConfigurationError(
+                "WALTER_MODEL and WALTER_WORKER_MODEL must both be non-empty."
+            )
+
+        return cls(provider, api_key, base_url, manager_model, worker_model)
+
+
+def _should_replay_reasoning_content(context: object, base_url: str) -> bool:
+    """Replay reasoning only for a valid OpenRouter request context."""
+
+    normalized_base_url = _normalize_base_url(base_url)
+    parsed = urlparse(normalized_base_url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return False
+    if context is None:
+        return False
+
+    context_url = getattr(context, "base_url", None)
+    if isinstance(context, Mapping):
+        context_url = context.get("base_url")
+    if context_url is not None and _normalize_base_url(str(context_url)) != normalized_base_url:
+        return False
+
+    host = (parsed.hostname or "").lower()
+    return (
+        host == "openrouter.ai"
+        or host.endswith(".openrouter.ai")
+        or (context_url is not None and _normalize_base_url(str(context_url)) == normalized_base_url)
+    )
+
+
+@lru_cache(maxsize=8)
+def _openrouter_client(config: RuntimeConfig) -> AsyncOpenAI:
+    return AsyncOpenAI(base_url=config.base_url, api_key=config.api_key)
+
+
+def _openrouter_model(model_name: str, config: RuntimeConfig) -> OpenAIChatCompletionsModel:
+    return OpenAIChatCompletionsModel(
+        model=model_name,
+        openai_client=_openrouter_client(config),
+        should_replay_reasoning_content=lambda context: _should_replay_reasoning_content(
+            context, config.base_url
+        ),
+    )
+
+
+def build_models(config: RuntimeConfig) -> tuple[OpenAIChatCompletionsModel, OpenAIChatCompletionsModel]:
+    if config.provider != "openrouter":
+        raise RuntimeConfigurationError(
+            f"Unsupported WALTER_MODEL_PROVIDER={config.provider!r}; only 'openrouter' is supported."
+        )
+    set_tracing_disabled(True)
+    return (
+        _openrouter_model(config.manager_model, config),
+        _openrouter_model(config.worker_model, config),
+    )
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -87,7 +203,7 @@ def _agent(
     *,
     output_type=None,
     tools=None,
-    model_env: str | None = None,
+    model=None,
 ):
     kwargs = {
         "name": name,
@@ -97,10 +213,8 @@ def _agent(
         kwargs["output_type"] = output_type
     if tools is not None:
         kwargs["tools"] = tools
-    if model_env:
-        model = os.getenv(model_env)
-        if model:
-            kwargs["model"] = model
+    if model is not None:
+        kwargs["model"] = model
     return Agent(**kwargs)
 
 
@@ -119,12 +233,14 @@ def _trace_sensitive_enabled() -> bool:
 async def delegate_task(packet: TaskPacket) -> WorkerResult:
     """Create one temporary least-privilege specialist and return its structured result."""
 
+    config = RuntimeConfig.from_env()
+    _, worker_model = build_models(config)
     worker = _agent(
         name=f"Walter specialist: {packet.role[:64]}",
         instructions=WORKER_INSTRUCTIONS,
         output_type=WorkerResult,
         tools=_tools_for(packet.tool_policy),
-        model_env="WALTER_WORKER_MODEL",
+        model=worker_model,
     )
 
     result = await Runner.run(
@@ -143,7 +259,6 @@ async def delegate_task(packet: TaskPacket) -> WorkerResult:
     if not isinstance(output, WorkerResult):
         raise TypeError("Specialist returned an unexpected output type.")
 
-    # Walter owns task identity even if the worker emits a different value.
     output.task_id = packet.task_id
     return output
 
@@ -151,9 +266,11 @@ async def delegate_task(packet: TaskPacket) -> WorkerResult:
 def build_walter() -> Agent:
     """Build the Walter Manager using the repository doctrine plus the Agents SDK adapter."""
 
+    config = RuntimeConfig.from_env()
+    manager_model, _ = build_models(config)
     return _agent(
         name="Walter",
         instructions=_walter_instructions(),
         tools=[delegate_task],
-        model_env="WALTER_MODEL",
+        model=manager_model,
     )

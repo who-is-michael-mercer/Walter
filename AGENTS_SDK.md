@@ -12,7 +12,7 @@ Pydantic-validated `WorkerResult`.
 ```bash
 git fetch origin
 git switch runtime/agents-sdk
-git pull --ff-only
+git pull
 ```
 
 ## 2. Create and activate a virtual environment
@@ -31,29 +31,43 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-The editable install is intentional: this runtime reads Walter's canonical `SYSTEM_PROMPT.md`
-directly from the repository checkout.
+The editable install is intentional: this first runtime reads Walter's canonical
+`SYSTEM_PROMPT.md` directly from the repository checkout.
 
-## 4. Configure the API key
+## 4. Configure the OpenRouter API key
 
-If `OPENAI_API_KEY` is already exported in your shell, nothing else is required.
+Walter requires an OpenRouter key. If `OPENROUTER_API_KEY` is already exported in your shell,
+nothing else is required.
 
 Alternatively create a local `.env` file in the repository root:
 
 ```text
-OPENAI_API_KEY=your_key_here
+# Required: OpenRouter API key (never commit a real key).
+OPENROUTER_API_KEY=your_openrouter_key_here
+WALTER_MODEL_PROVIDER=openrouter
+
+# Optional model and endpoint overrides.
+WALTER_MODEL=moonshotai/kimi-k3
+WALTER_WORKER_MODEL=moonshotai/kimi-k3
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 ```
 
 `.env` is gitignored. Never commit the key.
 
-Optional model overrides:
+The default endpoint is `https://openrouter.ai/api/v1`; override it with
+`OPENROUTER_BASE_URL` when using a compatible OpenRouter endpoint. Both manager and worker
+models are constructed explicitly with `AsyncOpenAI` and `OpenAIChatCompletionsModel`.
+Walter never falls back to the OpenAI default client. SDK tracing is disabled, and the model's
+reasoning replay hook is enabled so OpenRouter `reasoning_content` survives tool-call turns.
 
-```text
-WALTER_MODEL=your_manager_model
-WALTER_WORKER_MODEL=your_worker_model
+For a local configuration template:
+
+```bash
+cp .env.example .env
 ```
 
-If those variables are omitted, the Agents SDK's configured/default OpenAI model is used.
+Run credit-free tests with `python -m pytest -q`. The optional live smoke test requires an
+explicit opt-in: `WALTER_LIVE_SMOKE=1 python -m pytest -q -m live`.
 
 ## 5. Start Walter
 
@@ -62,6 +76,15 @@ Interactive mode:
 ```bash
 walter
 ```
+
+Then give Walter a goal at the prompt:
+
+```text
+walter> Develop three distinct positioning directions for a new premium camping brand and recommend the strongest one.
+```
+
+Walter will decide what specialist lanes are required, create temporary workers through the
+Agents SDK, inspect their structured outputs, and return the final outcome.
 
 Useful interactive commands:
 
@@ -86,71 +109,21 @@ walter "Create a launch strategy for a new electrolyte brand aimed at multi-day 
 
 A one-shot run is stateless unless you explicitly add `--session NAME`.
 
-## Capability routing
+## Current v0 capability boundary
 
-Walter now chooses between two least-privilege worker capability profiles:
+This first runtime proves Walter's Manager/subagent loop. Specialist workers currently have
+model reasoning plus structured output only. They do not yet receive web, shell, filesystem,
+GitHub, email, or other external action tools.
 
-- `model_only` — reasoning, writing, synthesis, critique, planning, and other tasks that do not
-  require fresh external evidence.
-- `web_search` — adds the Agents SDK hosted `WebSearchTool` for research tasks that materially
-  depend on current or externally verifiable public information.
+That limitation is deliberate. It lets the core orchestration behavior run before adding tool
+routing and permissions. Walter is instructed to report a blocker rather than pretend an
+external action or verification occurred.
 
-Walter still owns the decision to grant web search. A worker does not choose or expand its own
-capabilities. Web-enabled workers must return the sources they actually relied on in their
-structured `WorkerResult`.
+The next runtime layer should add least-privilege capability profiles so Walter can create, for
+example, a research worker with web search or an implementation worker with a sandboxed
+workspace without granting those tools to every agent.
 
-Workers still do not have shell, filesystem, GitHub, email, or other action tools. Those remain
-future capability profiles.
-
-## Tracing and proving delegation
-
-Every goal is wrapped in a named `Walter orchestration` trace. After each completed goal, the
-CLI prints a trace ID such as:
-
-```text
-Trace ID: trace_...
-```
-
-Use that ID in the OpenAI Dashboard Trace viewer. The trace hierarchy should show Walter's
-model turns, the `delegate_task` function calls, and nested specialist agent/model/tool spans.
-A web-enabled researcher will additionally show a hosted web-search tool call.
-
-Trace content is redacted by default: structure and spans are exported without model/tool
-inputs and outputs. For a controlled debugging session where you intentionally want those
-payloads visible in the trace, start Walter with:
-
-```bash
-walter --trace-sensitive
-```
-
-Do not use `--trace-sensitive` for goals containing secrets or information you do not want in
-trace payloads.
-
-## Recommended verification test
-
-Start a fresh named session:
-
-```bash
-walter --session web-test
-```
-
-Then give Walter this goal:
-
-```text
-Research the current OpenAI Agents SDK Python capabilities for web search and tracing. Use fresh external sources where appropriate. Have a separate reviewer assess whether the research is adequately sourced and current, then give me a concise recommendation for how Walter should use those capabilities.
-```
-
-Expected behavior:
-
-1. Walter defines acceptance criteria before delegation.
-2. The research lane receives `tool_policy=web_search`.
-3. The researcher performs real hosted web search and returns source URLs.
-4. A review lane is separately delegated; it should normally remain `model_only` when the
-   accepted research packet contains enough evidence to review.
-5. Walter accepts, revises, or replaces work before giving the final recommendation.
-6. The terminal prints one trace ID for the whole orchestration workflow.
-
-## Runtime files
+## Files added by this runtime
 
 ```text
 pyproject.toml
@@ -161,6 +134,6 @@ src/walter/cli.py
 AGENTS_SDK.md
 ```
 
-`contracts.py` defines Pydantic task/result contracts and capability policies. `runtime.py`
-implements dynamic specialist creation, least-privilege tool routing, and delegation. `cli.py`
-provides the `walter` command, local sessions, trace privacy configuration, and trace IDs.
+`contracts.py` defines the Pydantic task/result contracts. `runtime.py` implements dynamic
+specialist creation and delegation. `cli.py` provides the `walter` terminal command and local
+session persistence.

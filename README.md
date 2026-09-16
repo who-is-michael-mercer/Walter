@@ -62,6 +62,39 @@ Walter (Manager)
   +--> Reviewer Agent      --> QA result
 ```
 
+## Runtime configuration
+
+The Agents SDK runtime uses OpenRouter's chat-completions endpoint explicitly. Copy
+`.env.example` to `.env` and set the required provider/key values. The default manager and
+worker model is Kimi K3:
+
+```text
+# Required: OpenRouter API key (never commit a real key).
+OPENROUTER_API_KEY=your_openrouter_key_here
+WALTER_MODEL_PROVIDER=openrouter
+
+# Optional model and endpoint overrides.
+WALTER_MODEL=moonshotai/kimi-k3
+WALTER_WORKER_MODEL=moonshotai/kimi-k3
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+```
+
+Walter does not fall back to OpenAI's default client or endpoint, and tracing is disabled to
+keep provider prompts and tool payloads out of tracing. Configuration errors are reported by
+the CLI before a run starts.
+
+Run the normal, credit-free test suite with:
+
+```bash
+python -m pytest -q
+```
+
+An API-calling smoke test is opt-in and never runs as part of the normal suite:
+
+```bash
+WALTER_LIVE_SMOKE=1 python -m pytest -q -m live
+```
+
 Workers do not spawn workers. Workers do not own global state. Workers do not broaden their own scope.
 
 ## Task state machine

@@ -8,7 +8,7 @@ from pathlib import Path
 from agents import RunConfig, Runner, SQLiteSession, trace
 from dotenv import load_dotenv
 
-from .runtime import build_walter
+from .runtime import RuntimeConfigurationError, build_walter
 
 
 DEFAULT_SESSION = "main"
@@ -54,13 +54,6 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
-
-
-def _require_api_key() -> None:
-    if not os.getenv("OPENAI_API_KEY"):
-        raise SystemExit(
-            "OPENAI_API_KEY is not set. Export it in your shell or add it to a local .env file."
-        )
 
 
 def _configure_trace_privacy(include_sensitive: bool) -> None:
@@ -152,7 +145,6 @@ async def _run_interactive(session_id: str, max_turns: int) -> None:
 
 def main() -> None:
     load_dotenv()
-    _require_api_key()
     args = _parser().parse_args()
     _configure_trace_privacy(args.trace_sensitive)
 
@@ -160,11 +152,13 @@ def main() -> None:
         raise SystemExit("--max-turns must be at least 1.")
 
     goal = " ".join(args.goal).strip()
-    if goal:
-        asyncio.run(_run_once(goal, args.session, args.max_turns))
-        return
-
-    asyncio.run(_run_interactive(args.session or DEFAULT_SESSION, args.max_turns))
+    try:
+        if goal:
+            asyncio.run(_run_once(goal, args.session, args.max_turns))
+            return
+        asyncio.run(_run_interactive(args.session or DEFAULT_SESSION, args.max_turns))
+    except RuntimeConfigurationError as exc:
+        raise SystemExit(f"Walter configuration error: {exc}") from exc
 
 
 if __name__ == "__main__":

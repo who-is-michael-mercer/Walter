@@ -263,14 +263,14 @@ async def delegate_task(packet: TaskPacket) -> WorkerResult:
     return output
 
 
-def build_walter() -> Agent:
+def build_walter(controller=None) -> Agent:
     """Build the Walter Manager using the repository doctrine plus the Agents SDK adapter."""
 
     config = RuntimeConfig.from_env()
     manager_model, _ = build_models(config)
     return _agent(
         name="Walter",
-        instructions=_walter_instructions(),
-        tools=[delegate_task],
+        instructions=(_walter_instructions() if controller is None else controller.instructions()),
+        tools=([delegate_task] if controller is None else controller.tools()),
         model=manager_model,
     )

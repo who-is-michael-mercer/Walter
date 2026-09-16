@@ -104,6 +104,28 @@ def test_manager_uses_manager_model_and_worker_uses_worker_model(monkeypatch):
     assert agents[0]["tools"] == [runtime.delegate_task]
 
 
+def test_manager_uses_durable_controller_when_supplied(monkeypatch):
+    class Controller:
+        def instructions(self):
+            return "durable instructions"
+
+        def tools(self):
+            return ["durable tool"]
+
+    monkeypatch.setattr(
+        runtime.RuntimeConfig,
+        "from_env",
+        classmethod(lambda cls: runtime.RuntimeConfig(
+            "openrouter", "key", "https://openrouter.ai/api/v1", "manager", "worker"
+        )),
+    )
+    monkeypatch.setattr(runtime, "build_models", lambda value: (object(), object()))
+    monkeypatch.setattr(runtime, "_agent", lambda **kwargs: kwargs)
+    manager = runtime.build_walter(Controller())
+    assert manager["instructions"] == "durable instructions"
+    assert manager["tools"] == ["durable tool"]
+
+
 def test_delegate_returns_mocked_structured_tool_continuation(monkeypatch):
     packet = runtime.TaskPacket(
         task_id="t1",

@@ -63,6 +63,13 @@ class ApprovalStatus(StrEnum):
     SUPERSEDED = "superseded"
 
 
+class CapabilityRequestStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    ESCALATED = "escalated"
+
+
 class ApprovalGate(Model):
     """The exact approval request and semantics required by a task."""
     request_id: str
@@ -173,6 +180,22 @@ class WorkerFailure(Model):
     created_at: str = Field(default_factory=now)
 
 
+class CapabilityRequest(Model):
+    id: str = Field(default_factory=uid)
+    run_id: str
+    task_id: str
+    assignment_id: str
+    worker_id: str
+    requested_capability: CapabilityProfile
+    reason: str = Field(min_length=1)
+    risk: str = Field(min_length=1)
+    status: CapabilityRequestStatus = CapabilityRequestStatus.PENDING
+    approval_id: str | None = None
+    workspace_id: str | None = None
+    created_at: str = Field(default_factory=now)
+    updated_at: str = Field(default_factory=now)
+
+
 class RecoveryDecision(Decision):
     failure_id: str
 
@@ -268,6 +291,7 @@ class Run(Model):
     recoveries: list[RecoveryDecision] = Field(default_factory=list)
     approvals: dict[str, ApprovalRequest] = Field(default_factory=dict)
     approval_decisions: dict[str, ApprovalDecision] = Field(default_factory=dict)
+    capability_requests: dict[str, CapabilityRequest] = Field(default_factory=dict)
     replans: dict[str, ReplanProposal] = Field(default_factory=dict)
     unresolved_issues: list[str] = Field(default_factory=list)
     event_cursor: int = 0

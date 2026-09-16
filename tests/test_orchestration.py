@@ -1,6 +1,7 @@
 import pytest
-from walter.contracts import TaskPacket, WorkerResult
-from walter.models import ApprovalStatus, CapabilityProfile, FailureClass, ReplanProposal, TaskNode, TaskStatus
+from walter.contracts import CapabilityRequestPayload, TaskPacket, WorkerResult
+from walter.models import (ApprovalStatus, CapabilityProfile, CapabilityRequestStatus,
+    FailureClass, ReplanProposal, TaskNode, TaskStatus)
 from walter.orchestration import GateError, Orchestrator
 from walter.store import SQLiteStore
 
@@ -174,7 +175,7 @@ def test_approvals_exact_scope_immutable_and_completion_gate(kernel):
 
 def test_capability_approval_and_fingerprint(kernel):
     core, rid = kernel
-    core.add_tasks(rid, [task()])
+    core.add_tasks(rid, [task(required_checks=["compile"])])
     scope = {"task_id":"a", "capability":"developer_sandbox", "workspace_id":"workspace"}
     request = core.request_approval(rid, "change_capability", scope, "Requires editing")
     with pytest.raises(GateError):
@@ -184,10 +185,47 @@ def test_capability_approval_and_fingerprint(kernel):
     artifact = candidate(core, rid, workspace_fingerprint="tree-abc")
     with pytest.raises(GateError):
         core.review(rid, artifact.id, "reviewer", True, "checked", workspace_fingerprint="tree-def")
+    core.validate(rid, artifact.id, "compile", True, "compile succeeded", "executor",
+        workspace_fingerprint="tree-abc")
     core.review(rid, artifact.id, "reviewer", True, "checked", workspace_fingerprint="tree-abc")
     with pytest.raises(GateError):
         core.accept(rid, "a", "manager", "pass", workspace_fingerprint="tree-def")
     core.accept(rid, "a", "manager", "pass", workspace_fingerprint="tree-abc")
+
+
+def test_developer_sandbox_requires_executable_check_on_initial_plan(kernel):
+    core, rid = kernel
+    with pytest.raises(GateError, match="compile, unittest, or pytest"):
+        core.add_tasks(rid, [task(capability=CapabilityProfile.DEVELOPER_SANDBOX,
+            workspace_id="workspace", required_checks=["result_schema"])])
+    assert core.get_run(rid).tasks == {}
+
+
+def test_replan_rejects_schema_only_developer_addition_atomically(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task()])
+    proposal = ReplanProposal(base_revision=0, trigger="Need implementation", evidence=["Gap"],
+        add=[task("developer", capability=CapabilityProfile.DEVELOPER_SANDBOX,
+            workspace_id="workspace", required_checks=["result_schema"])])
+    core.propose_replan(rid, proposal)
+    before = core.get_run(rid)
+    with pytest.raises(GateError, match="compile, unittest, or pytest"):
+        core.apply_replan(rid, proposal.id)
+    assert core.get_run(rid) == before
+
+
+def test_approved_capability_change_cannot_bypass_executable_check(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task(required_checks=["result_schema"])])
+    scope = {"task_id": "a", "capability": "developer_sandbox", "workspace_id": "workspace"}
+    approval = core.request_approval(rid, "change_capability", scope,
+        "Approved developer escalation")
+    core.decide_approval(rid, approval.id, True, "human", "Approved exact scope")
+    before = core.get_run(rid)
+    with pytest.raises(GateError, match="compile, unittest, or pytest"):
+        core.change_capability(rid, "a", CapabilityProfile.DEVELOPER_SANDBOX,
+            approval.id, workspace_id="workspace")
+    assert core.get_run(rid) == before
 
 
 def test_resume_no_silent_rerun(kernel):
@@ -319,6 +357,114 @@ def test_old_assignment_cannot_fail_redelegated_work(kernel):
         "task.failed", "failure.classified", "assignment.failed"]
 
 
+def test_capability_request_preserves_partial_work_and_requires_manager_escalation(tmp_path):
+    path = tmp_path / "capability-request.db"
+    store = SQLiteStore(path)
+    core = Orchestrator(store)
+    rid = core.create_run("objective", ["accurate"]).id
+    core.add_tasks(rid, [task(), task("downstream", ["a"])])
+    assignment = core.delegate(rid, "a", "worker")
+    core.start(rid, "a")
+    result = WorkerResult(task_id="a", status="blocked", summary="Repository access needed",
+        deliverable="Partial analysis with reusable findings", evidence=["Inspected supplied context"],
+        blocker="Cannot inspect repository", capability_request=CapabilityRequestPayload(
+            requested_capability="repo_reader", reason="Need to inspect implementation files",
+            risk="Read-only access may expose repository content"))
+
+    before = core.get_run(rid)
+    with pytest.raises(GateError, match="current active assignment"):
+        core.record_capability_request(rid, "a", assignment.id, "forged-worker", result)
+    assert core.get_run(rid) == before
+    request = core.record_capability_request(rid, "a", assignment.id, "worker", result)
+    run = core.reload(rid)
+    assert run.capability_requests[request.id] == request
+    assert request.status == CapabilityRequestStatus.PENDING
+    assert run.tasks["a"].result.deliverable == "Partial analysis with reusable findings"
+    assert run.tasks["a"].result.evidence == ["Inspected supplied context"]
+    assert run.tasks["a"].artifact_ids == []
+    assert run.tasks["downstream"].status == TaskStatus.PLANNED
+
+    failure = core.fail_assignment(rid, "a", assignment.id, "worker",
+        FailureClass.CAPABILITY_UNAVAILABLE, "Requested repository access is unavailable")
+    assert core.recover(rid, failure.id, "Evaluate bounded capability escalation").action == "ESCALATE"
+    assert core.get_run(rid).tasks["a"].status == TaskStatus.BLOCKED
+    scope = {"task_id": "a", "capability": "repo_reader", "workspace_id": "repo-workspace"}
+    approval = core.request_approval(rid, "change_capability", scope,
+        "Grant requested read-only repository access", requested_capability=CapabilityProfile.REPO_READER)
+    with pytest.raises(GateError, match="workspace binding"):
+        core.link_capability_approval(rid, request.id, approval.id)
+    core.link_capability_approval(rid, request.id, approval.id, workspace_id="repo-workspace")
+    with pytest.raises(GateError, match="has not been granted"):
+        core.approve_capability_request(rid, request.id)
+    core.decide_approval(rid, approval.id, True, "human", "Approved bounded read-only access")
+    store.close()
+
+    store = SQLiteStore(path)
+    core = Orchestrator(store)
+    applied = core.apply_capability_escalation(rid, request.id)
+    assert applied.status == CapabilityRequestStatus.ESCALATED
+    run = core.reload(rid)
+    assert run.capability_requests[request.id].status == CapabilityRequestStatus.ESCALATED
+    assert run.tasks["a"].capability == CapabilityProfile.REPO_READER
+    assert run.tasks["a"].workspace_id == "repo-workspace"
+    assert run.tasks["a"].status == TaskStatus.READY
+    assert run.tasks["a"].result.deliverable == "Partial analysis with reusable findings"
+    assert run.tasks["downstream"].status == TaskStatus.PLANNED
+    version, events = run.version, list(core.store.events(rid))
+    assert core.apply_capability_escalation(rid, request.id) == applied
+    assert core.get_run(rid).version == version
+    assert core.store.events(rid) == events
+    store.close()
+
+    reloaded = SQLiteStore(path)
+    assert reloaded.load(rid).capability_requests[request.id].status == CapabilityRequestStatus.ESCALATED
+    reloaded.close()
+
+
+@pytest.mark.parametrize("status,classification", [
+    ("blocked", FailureClass.MISSING_EVIDENCE),
+    ("needs_revision", FailureClass.BAD_OUTPUT),
+])
+def test_noncompleted_worker_result_is_preserved_without_candidate_or_dependency_unlock(
+        kernel, status, classification):
+    core, rid = kernel
+    core.add_tasks(rid, [task(), task("downstream", ["a"])])
+    assignment = core.delegate(rid, "a", "worker")
+    core.start(rid, "a")
+    result = WorkerResult(task_id="a", status=status, summary="Partial result",
+        deliverable="Useful partial work", evidence=["partial evidence"], blocker="More work required")
+    core.record_provisional_result(rid, "a", assignment.id, "worker", result)
+    failure = core.fail_assignment(rid, "a", assignment.id, "worker", classification,
+        "Trusted classification of provisional result")
+    run = core.get_run(rid)
+    assert run.tasks["a"].result == result
+    assert run.tasks["a"].artifact_ids == []
+    assert run.tasks["downstream"].status == TaskStatus.PLANNED
+    assert run.failures[-1] == failure
+    assert core.recover(rid, failure.id, "Preserve partial work for explicit revision").action == "REVISE"
+    run = core.get_run(rid)
+    assert run.tasks["a"].status == TaskStatus.REVISION_REQUIRED
+    assert run.tasks["a"].result.deliverable == "Useful partial work"
+    assert run.tasks["downstream"].status == TaskStatus.PLANNED
+
+
+def test_manager_can_deny_capability_request_without_grant(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task()])
+    assignment = core.delegate(rid, "a", "worker")
+    core.start(rid, "a")
+    result = WorkerResult(task_id="a", status="blocked", summary="Requests write access",
+        deliverable="Partial work", capability_request=CapabilityRequestPayload(
+            requested_capability="developer_sandbox", reason="Need to edit files",
+            risk="Write access changes candidate files"))
+    request = core.record_capability_request(rid, "a", assignment.id, "worker", result)
+    core.deny_capability_request(rid, request.id, "Task must remain read-only")
+    run = core.get_run(rid)
+    assert run.capability_requests[request.id].status == CapabilityRequestStatus.DENIED
+    assert run.tasks["a"].capability == CapabilityProfile.MODEL_ONLY
+    assert core.store.events(rid)[-1].kind == "capability.denied"
+
+
 def test_new_task_gate_rejects_superseded_request(kernel):
     core, rid = kernel
     core.add_tasks(rid, [task()])
@@ -397,7 +543,7 @@ def test_configured_manager_authority_cannot_be_spoofed_or_supply_evidence():
 
 def test_workspace_can_resolve_blocked_capability_escalation(kernel):
     core, rid = kernel
-    core.add_tasks(rid, [task()])
+    core.add_tasks(rid, [task(required_checks=["compile"])])
     scope = {"task_id": "a", "capability": "developer_sandbox", "workspace_id": None}
     request = core.request_approval(rid, "change_capability", scope, "Needs a developer sandbox")
     core.decide_approval(rid, request.id, True, "operator", "Approved bounded capability")
@@ -413,7 +559,7 @@ def test_recovered_developer_task_workspace_replacement_is_exact_audited_and_dur
     core = Orchestrator(store)
     rid = core.create_run("objective", ["accurate"]).id
     core.add_tasks(rid, [task(capability=CapabilityProfile.DEVELOPER_SANDBOX,
-        workspace_id="workspace-v1")])
+        workspace_id="workspace-v1", required_checks=["compile"])])
 
     with pytest.raises(GateError, match="after recovery"):
         core.replace_workspace(rid, "a", "workspace-v1", "workspace-v2", "Initial task is not a retry")
@@ -446,11 +592,13 @@ def test_recovered_developer_task_workspace_replacement_is_exact_audited_and_dur
 def test_workspace_replacement_denies_candidate_and_terminal_states(kernel):
     core, rid = kernel
     core.add_tasks(rid, [task(capability=CapabilityProfile.DEVELOPER_SANDBOX,
-        workspace_id="workspace-v1")])
+        workspace_id="workspace-v1", required_checks=["compile"])])
     artifact = candidate(core, rid, workspace_fingerprint="tree-v1")
     with pytest.raises(GateError, match="after recovery"):
         core.replace_workspace(rid, "a", "workspace-v1", "workspace-v2", "Candidate still under review")
     core.review(rid, artifact.id, "reviewer", True, "Reviewed candidate",
+        workspace_fingerprint="tree-v1")
+    core.validate(rid, artifact.id, "compile", True, "compile succeeded", "executor",
         workspace_fingerprint="tree-v1")
     core.accept(rid, "a", "manager", "Accepted", workspace_fingerprint="tree-v1")
     with pytest.raises(GateError, match="after recovery"):

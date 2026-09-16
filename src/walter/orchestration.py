@@ -9,7 +9,7 @@ import json
 from typing import Callable
 from .contracts import WorkerResult
 from .models import (AcceptanceDecision, ApprovalDecision, ApprovalGate, ApprovalRequest, ApprovalStatus, Artifact,
-    ArtifactValidation, CapabilityProfile, Decision, Event, FailureClass, RecoveryDecision,
+    ArtifactValidation, CapabilityProfile, CapabilityRequest, CapabilityRequestStatus, Decision, Event, FailureClass, RecoveryDecision,
     ReplanProposal, Review, Run, TaskNode, TaskStatus, WorkerAssignment, WorkerFailure,
     WorkPlan, now)
 from .store import SQLiteStore
@@ -17,6 +17,9 @@ from .store import SQLiteStore
 
 class GateError(ValueError):
     pass
+
+
+EXECUTABLE_DEVELOPER_CHECKS = frozenset({"compile", "unittest", "pytest"})
 
 
 TRANSITIONS = {
@@ -28,7 +31,7 @@ TRANSITIONS = {
     TaskStatus.REVIEWING: {TaskStatus.ACCEPTED, TaskStatus.REVISION_REQUIRED, TaskStatus.REPLACED, TaskStatus.FAILED},
     TaskStatus.REVISION_REQUIRED: {TaskStatus.DELEGATED, TaskStatus.BLOCKED},
     TaskStatus.BLOCKED: {TaskStatus.READY, TaskStatus.REPLACED},
-    TaskStatus.FAILED: {TaskStatus.READY, TaskStatus.REVISION_REQUIRED, TaskStatus.REPLACED},
+    TaskStatus.FAILED: {TaskStatus.READY, TaskStatus.REVISION_REQUIRED, TaskStatus.REPLACED, TaskStatus.BLOCKED},
     TaskStatus.ACCEPTED: set(), TaskStatus.REPLACED: set(), TaskStatus.CANCELLED: set(),
 }
 
@@ -70,6 +73,13 @@ class Orchestrator:
         task.status = status
         task.updated_at = now()
         self._event(run, events, "task."+status.value.lower(), task_id=task.id, previous=previous.value, reason=reason)
+
+    @staticmethod
+    def _validate_capability_checks(task: TaskNode, capability: CapabilityProfile | None = None):
+        profile = capability or task.capability
+        if (profile == CapabilityProfile.DEVELOPER_SANDBOX and
+                not EXECUTABLE_DEVELOPER_CHECKS.intersection(task.required_checks)):
+            raise GateError("Developer sandbox requires compile, unittest, or pytest validation")
 
     def create_run(self, objective: str, completion_criteria: list[str], *, constraints: list[str] | None = None, max_replans: int = 3) -> Run:
         if not objective.strip() or not all(x.strip() for x in completion_criteria):
@@ -164,6 +174,7 @@ class Orchestrator:
                 task = source.model_copy(deep=True)
                 if task.id in run.tasks or task.status != TaskStatus.PLANNED or task.attempts or task.artifact_ids or task.assignment:
                     raise GateError("Only fresh unique tasks can be added")
+                self._validate_capability_checks(task)
                 run.tasks[task.id] = task
                 run.plan.task_ids.append(task.id)
                 self._event(run, events, "task.created", task_id=task.id)
@@ -271,6 +282,50 @@ class Orchestrator:
             self._event(run, events, "assignment.completed", assignment_id=task.assignment.id,
                 task_id=task.id, artifact_id=artifact.id)
             return artifact.model_copy(deep=True)
+        return self._mutate(run_id, operation)
+
+    @staticmethod
+    def _provisional_result(task, assignment_id: str, worker_id: str, result: WorkerResult):
+        if (task.status != TaskStatus.RUNNING or not task.assignment or
+                task.assignment.id != assignment_id or task.assignment.worker_id != worker_id):
+            raise GateError("Provisional result does not match the current active assignment")
+        if result.task_id != task.id or result.status not in {"blocked", "needs_revision"}:
+            raise GateError("Expected a matching blocked or needs_revision result")
+        task.result = result.model_copy(deep=True)
+        task.blocker = result.blocker or result.summary
+        task.updated_at = now()
+
+    def record_provisional_result(self, run_id: str, task_id: str, assignment_id: str,
+            worker_id: str, result: WorkerResult):
+        """Preserve partial worker output before trusted failure classification."""
+        def operation(run, events):
+            task = run.tasks[task_id]
+            self._provisional_result(task, assignment_id, worker_id, result)
+            self._event(run, events, "assignment.result_provisional", task_id=task_id,
+                assignment_id=assignment_id, worker_id=worker_id,
+                result=result.model_dump(mode="json"))
+        self._mutate(run_id, operation)
+
+    def record_capability_request(self, run_id: str, task_id: str, assignment_id: str,
+            worker_id: str, result: WorkerResult) -> CapabilityRequest:
+        """Persist an untrusted worker request without granting capability."""
+        def operation(run, events):
+            task = run.tasks[task_id]
+            self._provisional_result(task, assignment_id, worker_id, result)
+            payload = result.capability_request
+            if payload is None:
+                raise GateError("Structured capability request required")
+            requested = CapabilityProfile(payload.requested_capability)
+            if requested == task.capability:
+                raise GateError("Requested capability is already assigned")
+            request = CapabilityRequest(run_id=run.id, task_id=task_id,
+                assignment_id=assignment_id, worker_id=worker_id,
+                requested_capability=requested, reason=payload.reason, risk=payload.risk)
+            run.capability_requests[request.id] = request
+            self._event(run, events, "capability.requested",
+                request=request.model_dump(mode="json"),
+                provisional_result=result.model_dump(mode="json"))
+            return request.model_copy(deep=True)
         return self._mutate(run_id, operation)
 
     def _candidate(self, run, events, artifact_id, workspace_fingerprint=None):
@@ -413,6 +468,9 @@ class Orchestrator:
                 self._transition(run, events, task, TaskStatus.REPLACED, reason)
                 self._event(run, events, "worker.replaced", task_id=task.id, failure_id=failure.id,
                     worker_id=task.assignment.worker_id if task.assignment else None)
+            elif action == "ESCALATE" and kind == FailureClass.CAPABILITY_UNAVAILABLE:
+                self._transition(run, events, task, TaskStatus.BLOCKED, reason)
+                task.blocker = "Capability escalation pending"
             if task.artifact_ids:
                 rejected = run.artifacts[task.artifact_ids[-1]]
                 rejected.status = "rejected"
@@ -560,16 +618,155 @@ class Orchestrator:
     def require_approval(self, run_id: str, approval_id: str, action: str, scope: dict):
         self._approved(self.get_run(run_id), approval_id, action, scope)
 
+    def link_capability_approval(self, run_id: str, capability_request_id: str,
+            approval_id: str, *, workspace_id: str | None = None):
+        """Link a pending request to the exact change_capability approval scope."""
+        def operation(run, events):
+            capability_request = run.capability_requests[capability_request_id]
+            if (capability_request.status != CapabilityRequestStatus.PENDING or
+                    capability_request.approval_id is not None):
+                raise GateError("Capability request is not pending and unlinked")
+            approval = run.approvals.get(approval_id)
+            if (capability_request.requested_capability in {
+                    CapabilityProfile.REPO_READER, CapabilityProfile.DEVELOPER_SANDBOX} and
+                    not workspace_id):
+                raise GateError("Repository capabilities require an approved workspace binding")
+            scope = {"task_id": capability_request.task_id,
+                "capability": capability_request.requested_capability.value,
+                "workspace_id": workspace_id}
+            value, digest = _scope(scope)
+            if (not approval or approval.status == ApprovalStatus.SUPERSEDED or
+                    approval.action != "change_capability" or approval.scope_json != value or
+                    approval.scope_digest != digest):
+                raise GateError("Capability request requires an exact current approval request")
+            capability_request.approval_id = approval_id
+            capability_request.workspace_id = workspace_id
+            capability_request.updated_at = now()
+            self._event(run, events, "capability.approval_linked",
+                capability_request_id=capability_request_id, approval_id=approval_id)
+        self._mutate(run_id, operation)
+
+    def apply_capability_escalation(self, run_id: str, capability_request_id: str,
+            *, manager_id: str | None = None) -> CapabilityRequest:
+        """Atomically apply an exact approved capability and workspace grant."""
+        if manager_id is not None and manager_id != self.manager_id:
+            raise GateError("Capability authority does not match configured Manager")
+        current = self.get_run(run_id)
+        existing = current.capability_requests[capability_request_id]
+        if existing.status == CapabilityRequestStatus.ESCALATED:
+            task = current.tasks[existing.task_id]
+            if (task.capability != existing.requested_capability or
+                    task.workspace_id != existing.workspace_id):
+                raise GateError("Escalated capability request conflicts with durable task state")
+            return existing.model_copy(deep=True)
+
+        def operation(run, events):
+            capability_request = run.capability_requests[capability_request_id]
+            task = run.tasks[capability_request.task_id]
+            if (capability_request.status not in {CapabilityRequestStatus.PENDING,
+                    CapabilityRequestStatus.APPROVED} or not capability_request.approval_id):
+                raise GateError("Capability request is not linked for escalation")
+            if task.status not in {TaskStatus.BLOCKED, TaskStatus.READY, TaskStatus.REVISION_REQUIRED}:
+                raise GateError("Capability can only be applied in a safe non-active task state")
+            self._validate_capability_checks(task, capability_request.requested_capability)
+            scope = {"task_id": task.id,
+                "capability": capability_request.requested_capability.value,
+                "workspace_id": capability_request.workspace_id}
+            approval = run.approvals.get(capability_request.approval_id)
+            decision = run.approval_decisions.get(capability_request.approval_id)
+            if (not approval or approval.status != ApprovalStatus.APPROVED or
+                    not decision or not decision.approved):
+                raise GateError("Linked capability approval has not been granted")
+            self._approved(run, capability_request.approval_id, "change_capability", scope)
+            if (capability_request.requested_capability in {
+                    CapabilityProfile.REPO_READER, CapabilityProfile.DEVELOPER_SANDBOX} and
+                    not capability_request.workspace_id):
+                raise GateError("Repository capabilities require an approved workspace binding")
+            old_workspace_id = task.workspace_id
+            task.capability = capability_request.requested_capability
+            task.workspace_id = capability_request.workspace_id
+            task.updated_at = now()
+            if old_workspace_id != task.workspace_id:
+                self._event(run, events, "workspace.replaced" if old_workspace_id else "workspace.bound",
+                    task_id=task.id, old_workspace_id=old_workspace_id,
+                    new_workspace_id=task.workspace_id,
+                    reason="Approved capability escalation")
+            if capability_request.status == CapabilityRequestStatus.PENDING:
+                self._event(run, events, "capability.approved",
+                    capability_request_id=capability_request.id,
+                    approval_id=capability_request.approval_id)
+            capability_request.status = CapabilityRequestStatus.ESCALATED
+            capability_request.updated_at = now()
+            self._event(run, events, "capability.escalated",
+                capability_request_id=capability_request.id, task_id=task.id,
+                capability=task.capability.value, workspace_id=task.workspace_id,
+                approval_id=capability_request.approval_id)
+            if task.status == TaskStatus.BLOCKED and task.blocker == "Capability escalation pending":
+                task.blocker = "Approval prerequisites satisfied"
+            self._refresh(run, events)
+            return capability_request.model_copy(deep=True)
+        return self._mutate(run_id, operation)
+
+    def approve_capability_request(self, run_id: str, capability_request_id: str):
+        """Reflect a linked exact human approval; this does not grant capability."""
+        def operation(run, events):
+            capability_request = run.capability_requests[capability_request_id]
+            if capability_request.status != CapabilityRequestStatus.PENDING or not capability_request.approval_id:
+                raise GateError("Capability request is not awaiting linked approval")
+            approval = run.approvals.get(capability_request.approval_id)
+            decision = run.approval_decisions.get(capability_request.approval_id)
+            if (not approval or approval.status != ApprovalStatus.APPROVED or
+                    not decision or not decision.approved):
+                raise GateError("Linked capability approval has not been granted")
+            capability_request.status = CapabilityRequestStatus.APPROVED
+            capability_request.updated_at = now()
+            self._event(run, events, "capability.approved",
+                capability_request_id=capability_request_id,
+                approval_id=capability_request.approval_id)
+        self._mutate(run_id, operation)
+
+    def deny_capability_request(self, run_id: str, capability_request_id: str, reason: str):
+        def operation(run, events):
+            capability_request = run.capability_requests[capability_request_id]
+            if capability_request.status not in {CapabilityRequestStatus.PENDING,
+                    CapabilityRequestStatus.APPROVED} or not reason.strip():
+                raise GateError("Capability request cannot be denied")
+            capability_request.status = CapabilityRequestStatus.DENIED
+            capability_request.updated_at = now()
+            self._event(run, events, "capability.denied",
+                capability_request_id=capability_request_id, reason=reason)
+        self._mutate(run_id, operation)
+
+    def mark_capability_escalated(self, run_id: str, capability_request_id: str):
+        """Close an approved request only after the requested profile is durable."""
+        def operation(run, events):
+            capability_request = run.capability_requests[capability_request_id]
+            task = run.tasks[capability_request.task_id]
+            if (capability_request.status != CapabilityRequestStatus.APPROVED or
+                    task.capability != capability_request.requested_capability):
+                raise GateError("Approved capability has not been applied to the task")
+            capability_request.status = CapabilityRequestStatus.ESCALATED
+            capability_request.updated_at = now()
+            self._event(run, events, "capability.escalated",
+                capability_request_id=capability_request_id, task_id=task.id,
+                capability=task.capability.value, approval_id=capability_request.approval_id)
+        self._mutate(run_id, operation)
+
     def change_capability(self, run_id: str, task_id: str, capability: CapabilityProfile, approval_id: str, *, workspace_id: str | None = None):
         capability = CapabilityProfile(capability)
         def operation(run, events):
             task = run.tasks[task_id]
             if task.status not in {TaskStatus.PLANNED, TaskStatus.READY, TaskStatus.REVISION_REQUIRED, TaskStatus.BLOCKED}:
                 raise GateError("Cannot change capabilities of active or terminal task")
+            self._validate_capability_checks(task, capability)
             scope = {"task_id":task_id, "capability":capability.value, "workspace_id":workspace_id}
             self._approved(run, approval_id, "change_capability", scope)
             task.capability, task.workspace_id = capability, workspace_id
             self._event(run, events, "capability.escalated", **scope, approval_id=approval_id)
+            if task.status == TaskStatus.BLOCKED and task.blocker == "Capability escalation pending":
+                task.blocker = ("Capability prerequisites missing" if
+                    capability == CapabilityProfile.DEVELOPER_SANDBOX and not workspace_id
+                    else "Approval prerequisites satisfied")
             if task.status == TaskStatus.READY and not self._ready(run, task):
                 self._transition(run, events, task, TaskStatus.BLOCKED, "Capability prerequisites missing")
                 task.blocker = "Capability prerequisites missing"
@@ -622,6 +819,7 @@ class Orchestrator:
             for source in proposal.add:
                 if source.id in run.tasks or source.status != TaskStatus.PLANNED or source.attempts or source.assignment or source.artifact_ids:
                     raise GateError("Replan additions must be fresh unique tasks")
+                self._validate_capability_checks(source)
                 run.tasks[source.id] = source.model_copy(deep=True)
             self._graph(run)
             run.plan.task_ids = [key for key,t in run.tasks.items() if t.status != TaskStatus.CANCELLED]

@@ -84,7 +84,17 @@ def test_one_shot_builds_manager_around_new_durable_run(monkeypatch, capsys):
     assert observed["goal"] == "bounded goal"
     assert observed["controller"] is controller
     assert observed["closed"] is True
-    assert "Run ID: durable-run" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Run ID: durable-run" in output
+    assert "Local trace ID (provider export disabled): trace" in output
+
+
+def test_legacy_trace_sensitive_flag_is_an_honest_noop(monkeypatch):
+    monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "1")
+    args = cli._parser().parse_args(["--trace-sensitive", "goal"])
+    assert args.trace_sensitive is True
+    cli._configure_trace_privacy(args.trace_sensitive)
+    assert cli.os.environ["OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA"] == "0"
 
 
 def test_missing_provider_config_does_not_create_orphan_run(monkeypatch):

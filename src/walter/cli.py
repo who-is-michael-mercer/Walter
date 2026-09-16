@@ -53,17 +53,17 @@ def _parser() -> argparse.ArgumentParser:
         "--trace-sensitive",
         action="store_true",
         help=(
-            "Include model/tool inputs and outputs in exported OpenAI traces. Off by default "
-            "so trace structure is visible without exporting prompt contents."
+            "Reserved compatibility flag. Provider trace export and sensitive trace payloads "
+            "remain disabled in this runtime."
         ),
     )
     return parser
 
 
-def _configure_trace_privacy(include_sensitive: bool) -> None:
-    os.environ["OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA"] = (
-        "1" if include_sensitive else "0"
-    )
+def _configure_trace_privacy(_include_sensitive: bool) -> None:
+    # Provider tracing is deliberately disabled by runtime.build_models(). Keep
+    # accepting the legacy flag without suggesting that sensitive data is exported.
+    os.environ["OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA"] = "0"
 
 
 async def _execute(
@@ -106,7 +106,7 @@ async def _run_once(goal: str, session_id: str | None, max_turns: int) -> None:
             session_id=session_id, max_turns=max_turns,
         )
         _print_outcome(controller)
-        print(f"\nTrace ID (provider export disabled): {trace_id}")
+        print(f"\nLocal trace ID (provider export disabled): {trace_id}")
     finally:
         if session is not None:
             await session.close()
@@ -146,7 +146,7 @@ async def _run_interactive(session_id: str, max_turns: int) -> None:
                     session_id=session_id, max_turns=max_turns,
                 )
                 _print_outcome(controller)
-                print(f"\nTrace ID: {trace_id}")
+                print(f"\nLocal trace ID (provider export disabled): {trace_id}")
             except KeyboardInterrupt:
                 print("\nRun interrupted.")
             except RuntimeConfigurationError as exc:

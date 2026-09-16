@@ -10,3 +10,11 @@ node_modules/
 # Local orchestration scratch
 .local/
 scratch/
+
+# Python build and test artifacts
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/

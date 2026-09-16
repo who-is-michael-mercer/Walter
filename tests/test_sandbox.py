@@ -340,6 +340,18 @@ def test_worktree_branch_binding_is_reverified(workspace):
         manager.read_file(grant.id, "hello.py", worker_id="author")
 
 
+def test_inspect_grant_is_read_only_and_enforces_worker_binding(workspace):
+    manager, grant, _ = workspace
+    inspected = manager.inspect_grant(grant.id, worker_id="author")
+    assert inspected == grant and inspected is not grant
+    with pytest.raises(AttributeError):
+        inspected.worker_id = "intruder"
+    with pytest.raises(SandboxViolation, match="different worker"):
+        manager.inspect_grant(grant.id, worker_id="intruder")
+    with pytest.raises(SandboxViolation, match="Unknown or inactive"):
+        manager.inspect_grant("missing", worker_id="author")
+
+
 def test_useful_edit_freeze_reload_and_cleanup(workspace):
     manager, grant, repo = workspace
     manager.write_file(grant.id, "hello.py", "VALUE = 2\n", worker_id="author")

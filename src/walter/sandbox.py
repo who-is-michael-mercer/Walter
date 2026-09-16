@@ -603,6 +603,12 @@ class WorkspaceManager:
         grant = self._get(workspace_id, worker_id)
         return sorted(name for name, (kind, _, _) in self._inventory(grant).items() if kind == "file")
 
+    def inspect_grant(self, workspace_id: str, *,
+                      worker_id: str | None = None) -> WorkspaceGrant:
+        """Return an immutable copy after validating grant, worker, and worktree binding."""
+        with self._lock:
+            return replace(self._get(workspace_id, worker_id))
+
     def status(self, workspace_id: str, *, worker_id: str | None = None) -> str:
         grant = self._get(workspace_id, worker_id)
         self._inventory(grant)

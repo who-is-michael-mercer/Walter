@@ -1,61 +1,52 @@
 # Operating Model
 
-## Autonomy
+## Control loop
 
-The Manager operates with high autonomy and exception-based escalation. Once a goal is accepted, it has standing authorization to continue until the goal is complete, genuinely blocked, or an approval-gated action is reached.
+Walter translates each objective into:
 
-## Goal decomposition
+`Outcome → completion criteria → bounded tasks → dependencies → capabilities/checks → execution → validation/review → Manager acceptance`.
 
-Translate every goal into:
+The Manager owns the run. Specialists produce provisional artifacts. Deterministic code owns legal transitions, readiness, persistence, limits, approval scope, and completion.
 
-`Outcome -> Workstreams -> Tasks -> Dependencies -> Acceptance Criteria -> Execution Order`
+## Canonical task lifecycle
 
-### Decomposition rules
+- `PLANNED` — defined but not yet eligible.
+- `READY` — every dependency is `ACCEPTED`, inputs and capabilities exist, criteria/checks are declared, and no gate blocks execution.
+- `DELEGATED` — assigned to one temporary worker.
+- `RUNNING` — worker execution began.
+- `SUBMITTED` — a candidate artifact exists.
+- `REVIEWING` — validation or independent review is in progress/recorded.
+- `REVISION_REQUIRED` — candidate rejected with corrective direction.
+- `ACCEPTED` — Manager accepted evidence-backed work; only this state unlocks dependents.
+- `REPLACED` — worker/candidate route replaced after reassessment.
+- `BLOCKED` — a known condition prevents execution.
+- `FAILED` — execution failed and requires classified recovery.
+- `CANCELLED` — plan or human direction invalidated the task.
 
-1. Decompose by deliverable, not vague activity.
-2. Stop decomposing when a task fits one specialist lane.
-3. Identify dependencies before spawning workers.
-4. Run independent `READY` tasks in parallel where safe.
-5. Use explicit gates for accepted upstream artifacts.
-6. Replan dynamically when new facts reveal missing work or invalid assumptions.
-7. Use progressive elaboration; do not over-specify downstream tasks whose inputs do not yet exist.
-8. Distinguish necessary discovered work from optional enhancements.
+Legacy prose terms map only as follows: `ACTIVE` ≈ `DELEGATED`/`RUNNING`; `REVIEW` ≈ `SUBMITTED`/`REVIEWING`; `REVISION` ≈ `REVISION_REQUIRED`; `COMPLETE` ≈ `ACCEPTED`. New records and executable interfaces use only canonical names.
 
-## Task states
+## Planning and execution
 
-- `BLOCKED` — required input/dependency missing.
-- `READY` — executable now; required inputs exist.
-- `ACTIVE` — assigned to a worker.
-- `REVIEW` — worker output submitted for acceptance.
-- `REVISION` — output rejected with corrective direction.
-- `COMPLETE` — accepted and eligible to unlock dependents.
-- `FAILED/BLOCKED` — cannot proceed under current conditions.
+Decompose by inspectable deliverable, stop at one specialist lane, and create only workers whose required inputs exist. Use progressive elaboration for blocked downstream work. Parallelize independent `READY` tasks only when workspaces and writes cannot conflict.
 
-## Core dependency invariant
+Each task declares required inputs, dependencies, capability profile, trusted checks, review policy, attempt/revision limits, acceptance criteria, and stop condition. A result is accepted for submission only from the current assignment ID and worker. Assignment history and candidate lineage remain durable.
 
-> Do not delegate a task until its required inputs exist. Do not unlock dependent work until the upstream deliverable has been accepted.
+Developer revision is an explicit lifecycle: reject through classified failure, recover to a safe retry state, create a fresh candidate, atomically record `workspace.replaced`, then clean the old workspace. Silent rebinding is forbidden.
 
-## Parallelism
+A worker may return `blocked` or `needs_revision` with useful partial work. Walter persists that assignment-bound result, records no candidate artifact, keeps dependents locked, classifies the cause (`MISSING_EVIDENCE`, `BAD_OUTPUT`, or `CAPABILITY_UNAVAILABLE` as appropriate), and recovers explicitly. Ordinary provisional results therefore never become generic `TOOL_FAILURE` records.
 
-Optimize for maximum safe concurrency, not maximum agent count. Default active-worker cap is 4 unless runtime capacity or task characteristics justify another value.
+Capability escalation is typed and durable: `pending` request → exact scoped human decision → `approved` or `denied` → profile application → `escalated`. `approved` means the decision passed but the capability is not yet durable. Runtime application atomically and idempotently verifies the exact approval, updates task profile/workspace, and closes as `escalated`, so restart/retry cannot create a second change. Repository-read and developer requests precreate an exact Manager-owned workspace, clean it if rejected or setup fails, and reuse it after approval. Redelegation exposes that workspace read-only to `repo_reader` and writable only through bounded developer tools to `developer_sandbox`. Developer tasks require a declared `compile`, `unittest`, or `pytest` check when planned, replanned, or changed to that profile.
 
-## Worker lifecycle
+Every model-facing replan proposal is conservatively approval-gated. Trusted programmatic callers may still apply low-impact proposals directly through the core when they have independently established authority; that core facility is not delegated to the model.
 
-1. Task becomes `READY`.
-2. Manager chooses the required specialist lane.
-3. Manager creates a temporary worker with a task packet.
-4. Worker executes autonomously within lane.
-5. Worker submits a structured result.
-6. Manager evaluates acceptance criteria.
-7. If required, reviewer performs independent QA.
-8. Manager accepts, revises, replaces, or replans.
-9. Accepted output is promoted to canonical state.
-10. Worker is retired unless continuation in the same lane is useful.
+## Acceptance authority
 
-## Unknown-domain handling
+Worker submission is candidate evidence. Trusted validators record check results against the exact artifact digest/workspace fingerprint. A fresh reviewer is distinct from the author and cannot modify or accept the candidate. The Manager may accept only after required validations and reviews pass. The human retains final authority over consequential promotion.
 
-If the Manager lacks enough domain knowledge to decompose safely, create a domain-scoping specialist first. The scoping specialist may recommend workstreams, risks, and specialist roles, but does not execute the whole goal.
+## Persistence and interruption
 
-## Human updates
+Conversation sessions and operational state are separate. Ordered events and atomic run snapshots permit reload without reconstructing truth from chat. On resume, interrupted `DELEGATED` and `RUNNING` assignments become `FAILED` with recorded `TIMEOUT` evidence; recovery must be explicit before reassignment.
 
-Provide updates only for meaningful milestones, material risk, changed assumptions, genuine blockers, approval gates, and final outcomes. Do not narrate routine worker chatter.
+## Self-build boundary
+
+Self-build readiness means Walter has demonstrated a harmless offline candidate flow through scoped promotion-request creation. It does not authorize a real self-development objective, merge, push, deploy, or promotion.

@@ -1,23 +1,38 @@
-# Task Result
+# Candidate Result Packet
 
-**Task ID:** TASK-___  
-**Agent ID:** AGENT-___  
-**Status:** COMPLETE / PARTIAL / BLOCKED / FAILED
+**Task ID:** TASK-___
+**Worker/assignment ID:** ___
+**Worker-result status:** `completed` / `blocked` / `needs_revision`
 
-## Result
+Worker-result status describes the submission only. It is distinct from canonical task state and never means `ACCEPTED`.
+The task ID, assignment ID, and worker identity must match the current durable assignment or submission is rejected.
 
-## Deliverables / artifact references
+## Summary and candidate deliverable
 
-## Verification performed
+## Artifact references and changed files
+
+## Evidence / checks performed by worker
+
+Worker checks are evidence only; identify commands and observed results without claiming trusted validation or acceptance.
+
+## Inputs used and provenance
 
 ## Facts
 
 ## Assumptions / inferences
 
-## Uncertainties
+## Uncertainties and issues
 
-## Issues encountered
+## Additional expertise or capability needed
 
-## Additional expertise needed
+When requesting capability, provide exactly:
+
+- **Requested capability:** `model_only` / `researcher` / `repo_reader` / `developer_sandbox` / `reviewer`
+- **Reason:** why the acceptance criteria cannot be met with the current profile
+- **Risk:** concrete exposure introduced by the requested profile
+
+Represent these as the structured `capability_request` payload. A request normally accompanies `blocked`; it preserves partial work but creates no artifact or authority.
 
 ## Recommended Manager action
+
+Submit for trusted validation/review, revise, replace, replan, block, or escalate. The worker may not recommend itself as accepted.

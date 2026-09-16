@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 ToolPolicy = Literal["model_only", "web_search"]
+CapabilityName = Literal["model_only", "researcher", "repo_reader", "developer_sandbox", "reviewer"]
 
 
 class TaskPacket(BaseModel):
@@ -61,6 +62,14 @@ class SourceReference(BaseModel):
     note: str = ""
 
 
+class CapabilityRequestPayload(BaseModel):
+    """Untrusted worker proposal for a capability the Manager may evaluate."""
+
+    requested_capability: CapabilityName
+    reason: str = Field(min_length=1)
+    risk: str = Field(min_length=1)
+
+
 class WorkerResult(BaseModel):
     """Structured, provisional worker output returned to Walter for acceptance review."""
 
@@ -77,7 +86,8 @@ class WorkerResult(BaseModel):
     uncertainties: list[str] = Field(default_factory=list)
     acceptance_check: list[CriterionCheck] = Field(default_factory=list)
     blocker: str | None = None
+    capability_request: CapabilityRequestPayload | None = None
     specialist_request: str | None = Field(
         default=None,
-        description="A specialty this worker believes Walter should create, if one is required.",
+        description="Deprecated compatibility field for an unstructured specialist suggestion.",
     )

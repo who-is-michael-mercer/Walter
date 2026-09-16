@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import os
+import json
+import sys
 from pathlib import Path
 
 from agents import RunConfig, Runner, SQLiteSession, trace
 from dotenv import load_dotenv
 
-from .runtime import RuntimeConfigurationError, build_walter
+from .runtime import RuntimeConfig, RuntimeConfigurationError, build_walter
+from .adapter import INITIAL_COMPLETION_CRITERION
 
 
 DEFAULT_SESSION = "main"
@@ -49,17 +53,17 @@ def _parser() -> argparse.ArgumentParser:
         "--trace-sensitive",
         action="store_true",
         help=(
-            "Include model/tool inputs and outputs in exported OpenAI traces. Off by default "
-            "so trace structure is visible without exporting prompt contents."
+            "Reserved compatibility flag. Provider trace export and sensitive trace payloads "
+            "remain disabled in this runtime."
         ),
     )
     return parser
 
 
-def _configure_trace_privacy(include_sensitive: bool) -> None:
-    os.environ["OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA"] = (
-        "1" if include_sensitive else "0"
-    )
+def _configure_trace_privacy(_include_sensitive: bool) -> None:
+    # Provider tracing is deliberately disabled by runtime.build_models(). Keep
+    # accepting the legacy flag without suggesting that sensitive data is exported.
+    os.environ["OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA"] = "0"
 
 
 async def _execute(
@@ -92,59 +96,180 @@ async def _execute(
 
 
 async def _run_once(goal: str, session_id: str | None, max_turns: int) -> None:
-    walter = build_walter()
-    session = SQLiteSession(session_id, _session_db()) if session_id else None
-    result, trace_id = await _execute(
-        walter,
-        goal,
-        session=session,
-        session_id=session_id,
-        max_turns=max_turns,
-    )
-    print(result.final_output)
-    print(f"\nTrace ID: {trace_id}")
+    RuntimeConfig.from_env()  # Validate before creating durable operational state.
+    controller = _controller(goal)
+    session = None
+    try:
+        session = SQLiteSession(session_id, _session_db()) if session_id else None
+        _, trace_id = await _execute(
+            build_walter(controller), goal, session=session,
+            session_id=session_id, max_turns=max_turns,
+        )
+        _print_outcome(controller)
+        print(f"\nLocal trace ID (provider export disabled): {trace_id}")
+    finally:
+        if session is not None:
+            await session.close()
+        controller.close()
 
 
 async def _run_interactive(session_id: str, max_turns: int) -> None:
-    walter = build_walter()
     session = SQLiteSession(session_id, _session_db())
 
     print(f"Walter ready. Session: {session_id}")
     print("Commands: :clear resets this conversation, :quit exits.")
-    print("Tracing: enabled. Each completed goal prints its OpenAI trace ID.")
+    print("Operational state is durable. Provider trace export is disabled.")
 
-    while True:
-        try:
-            goal = input("\nwalter> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
+    try:
+        while True:
+            try:
+                goal = input("\nwalter> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
 
-        if not goal:
-            continue
-        if goal in {":quit", ":q", "quit", "exit"}:
-            return
-        if goal == ":clear":
-            await session.clear_session()
-            print("Session cleared.")
-            continue
+            if not goal:
+                continue
+            if goal in {":quit", ":q", "quit", "exit"}:
+                return
+            if goal == ":clear":
+                await session.clear_session()
+                print("Session cleared.")
+                continue
 
-        try:
-            result, trace_id = await _execute(
-                walter,
-                goal,
-                session=session,
-                session_id=session_id,
-                max_turns=max_turns,
-            )
-            print(f"\n{result.final_output}")
-            print(f"\nTrace ID: {trace_id}")
-        except KeyboardInterrupt:
-            print("\nRun interrupted.")
+            controller = None
+            try:
+                RuntimeConfig.from_env()  # Never orphan a run on missing provider configuration.
+                controller = _controller(goal)
+                _, trace_id = await _execute(
+                    build_walter(controller), goal, session=session,
+                    session_id=session_id, max_turns=max_turns,
+                )
+                _print_outcome(controller)
+                print(f"\nLocal trace ID (provider export disabled): {trace_id}")
+            except KeyboardInterrupt:
+                print("\nRun interrupted.")
+            except RuntimeConfigurationError as exc:
+                print(f"Walter configuration error: {exc}")
+            finally:
+                if controller is not None:
+                    controller.close()
+    finally:
+        await session.close()
+
+
+
+def _store():
+    from .store import SQLiteStore
+    directory = Path.cwd() / ".local"
+    directory.mkdir(parents=True, exist_ok=True)
+    return SQLiteStore(directory / "walter-operations.db")
+
+
+def _controller(goal=None, run_id=None):
+    from .adapter import DurableController
+    from .orchestration import Orchestrator
+    from .sandbox import WorkspaceManager
+    store = _store()
+    try:
+        core = Orchestrator(store)
+        if run_id is None:
+            run_id = core.create_run(goal, [INITIAL_COMPLETION_CRITERION]).id
+        return DurableController(core, run_id, WorkspaceManager(Path.cwd()))
+    except Exception:
+        store.close()
+        raise
+
+
+def _print_outcome(controller):
+    run = controller.inspect()
+    print(f"Run ID: {run.id}\nDurable status: {run.status}")
+    if run.status == "completed":
+        print(run.final_result or "Completed through the kernel acceptance gate.")
+    else:
+        print("Run is not complete. Inspect durable tasks, blockers, and approvals with walter run inspect " + run.id)
+
+
+async def _resume(run_id, max_turns):
+    controller = _controller(run_id=run_id)
+    try:
+        controller.core.resume(run_id)
+        _print_outcome(controller)
+    finally:
+        controller.close()
+
+
+async def _resume_and_execute(run_id, max_turns):
+    RuntimeConfig.from_env()  # Validate before recording a resume mutation.
+    controller = _controller(run_id=run_id)
+    try:
+        controller.core.resume(run_id)
+        await _execute(build_walter(controller),
+            "Continue this durable run from its persisted state. Inspect it first; recover interrupted assignments explicitly.",
+            max_turns=max_turns)
+        _print_outcome(controller)
+    finally:
+        controller.close()
+
+
+def _local_human_principal() -> str:
+    uid = os.getuid() if hasattr(os, "getuid") else "unknown"
+    return f"local-os:{getpass.getuser()}:uid:{uid}"
+
+
+def _operations(argv):
+    parser = argparse.ArgumentParser(prog="walter run")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("list")
+    for name in ("inspect", "events", "resume"):
+        command = commands.add_parser(name)
+        command.add_argument("run_id")
+        if name == "resume":
+            command.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
+            command.add_argument("--execute", action="store_true",
+                                 help="After offline recovery, invoke the configured Manager model.")
+    approval = commands.add_parser("approve")
+    approval.add_argument("run_id")
+    approval.add_argument("approval_id")
+    approval.add_argument("--deny", action="store_true")
+    approval.add_argument("--reason", required=True)
+    commands.add_parser("readiness-demo")
+    args = parser.parse_args(argv)
+    if args.command == "readiness-demo":
+        from .readiness import run_readiness_demo
+        report = run_readiness_demo(Path.cwd())
+        print(report.model_dump_json(indent=2) if hasattr(report, "model_dump_json") else json.dumps(report, indent=2))
+        return
+    if args.command == "resume":
+        target = _resume_and_execute if args.execute else _resume
+        asyncio.run(target(args.run_id, args.max_turns))
+        return
+    store = _store()
+    try:
+        if args.command == "list":
+            print(json.dumps([{"id": r.id, "objective": r.objective, "status": r.status} for r in store.list_runs()], indent=2))
+        elif args.command == "inspect":
+            print(store.load(args.run_id).model_dump_json(indent=2))
+        elif args.command == "events":
+            print(json.dumps([e.model_dump(mode="json") for e in store.events(args.run_id)], indent=2))
+        elif args.command == "approve":
+            from .orchestration import Orchestrator
+            core = Orchestrator(store)
+            core.decide_approval(args.run_id, args.approval_id, approved=not args.deny,
+                                 human_id=_local_human_principal(), reason=args.reason)
+            print(store.load(args.run_id).model_dump_json(indent=2))
+    finally:
+        store.close()
 
 
 def main() -> None:
     load_dotenv()
+    if len(sys.argv) > 1 and sys.argv[1] == "run":
+        try:
+            _operations(sys.argv[2:])
+        except (KeyError, ValueError, RuntimeError) as exc:
+            raise SystemExit(f"Walter operation error: {exc}") from exc
+        return
     args = _parser().parse_args()
     _configure_trace_privacy(args.trace_sensitive)
 

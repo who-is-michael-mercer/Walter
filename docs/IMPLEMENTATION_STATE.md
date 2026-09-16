@@ -78,4 +78,4 @@ TASK-006 audit fixes add assignment-bound typed capability requests and expected
 escalations; atomic, idempotent, restart-safe capability application with rejection cleanup and
 profile-correct redelegation; executable-check enforcement for developer planning/replanning/change; and
 exact human gates for every model-facing replan. These fixes are implemented and covered by the current
-test evidence, but TASK-006 remains in `REVIEW` until final whole-blueprint acceptance.
+test evidence and were accepted by the final whole-blueprint audit.

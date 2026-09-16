@@ -1,58 +1,29 @@
 # Quality Assurance Protocol
 
-## Core rule
+## Evidence chain
 
-No worker output is complete merely because the worker says it is.
+Worker output is always provisional. Acceptance requires evidence bound to the exact candidate content digest and, for workspace work, the frozen workspace fingerprint.
 
-## Manager acceptance check
+1. The worker submits a structured result and candidate artifact.
+2. Trusted validators run every predeclared check.
+3. A fresh reviewer evaluates the candidate and criteria when review is required.
+4. The Manager records an acceptance decision only after all gates pass.
+5. Only the accepted artifact may enter canonical state or unlock dependents.
 
-For every task, the Manager checks:
+The author cannot validate or review its own artifact. The reviewer must differ from the author, receives read-only access, and cannot alter or accept the candidate. A development reviewer must actually inspect candidate files. Changed candidate identity makes earlier evidence stale.
 
-- required deliverable exists;
-- requested scope is satisfied;
-- explicit acceptance criteria are met;
-- obvious contradictions or omissions are absent;
-- evidence/verification appropriate to the domain is present.
+Submission is assignment-bound: task, assignment ID, and worker ID must match the current persisted assignment. Candidate action approval is constructed and later rechecked from trusted current workspace/artifact state; model-supplied branch, base, or diff identity is insufficient.
 
-This check is managerial acceptance, not a substitute for specialist QA.
+## Trusted checks
 
-## Independent reviewer threshold
+The current adapter supports `result_schema`, `compile`, `unittest`, and `pytest`. `result_schema` verifies structured completion and a nonempty deliverable; it is not a claim of substantive quality. Executable checks run through the isolated sandbox and record argv, return code, stdout, and stderr. Zero discovered `unittest` tests do not count as a pass.
 
-Create an independent reviewer when one or more apply:
+## Review policy
 
-- high impact;
-- specialist knowledge beyond routine Manager inspection;
-- difficult-to-verify correctness;
-- security, safety, compliance, or legal relevance;
-- irreversible consequences;
-- externally visible or reputation-sensitive output;
-- low confidence;
-- conflicting worker results;
-- historically weak worker performance.
+Runtime-planned tasks require independent review; `developer_sandbox` tasks are marked high risk. Review should test every acceptance criterion and use artifact, validation, source/diff, and relevant upstream evidence. Security, safety, permission, and self-modifying work always require independent evaluation.
 
-## Domain-appropriate evidence
+The Manager checks deliverable existence, scope, criteria, contradictions, provenance, validation results, reviewer independence, and candidate identity. Manager acceptance is necessary but does not replace scoped human promotion approval.
 
-- Research: credible sources, traceable evidence, freshness as needed.
-- Code/technical work: tests, builds, static checks, observable runtime behavior, or equivalent verification.
-- Data work: reproducibility, integrity checks, reconciliations.
-- Creative work: brief adherence, constraints, consistency, and relevant reviewer judgment.
-- Strategy: evidence, internal coherence, assumptions, risks, and explicit tradeoffs.
+## Rejection
 
-## Revisions
-
-Default maximum: 2 failed revision cycles for the same worker before reassessment.
-
-After repeated failure, the Manager should determine whether the cause is:
-
-- poor worker fit;
-- bad task definition;
-- missing input;
-- unrealistic acceptance criteria;
-- hidden dependency;
-- tool/access limitation.
-
-Then replace, split, revise, or replan rather than looping.
-
-## Conflicting outputs
-
-Do not average conflicting specialist conclusions. Compare evidence. If material disagreement remains, create an adjudicator or targeted follow-up specialist.
+Failed validation or review prevents acceptance. Correction routes through `REVISION_REQUIRED`, replacement, or explicit replan. Default maximum revisions with the same route are two; attempts and replans are separately bounded. Conflicting material judgments require targeted follow-up or adjudication, not averaging.

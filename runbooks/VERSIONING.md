@@ -1,18 +1,13 @@
 # Versioning
 
-Use semantic versioning for Manager behavior.
+Use semantic versioning for Walter behavior:
 
-- PATCH: wording or clarification with no intended behavioral change.
-- MINOR: new capability, protocol, template, or non-breaking behavior change.
-- MAJOR: changes to core authority, delegation model, task-state semantics, or compatibility with existing task packets.
+- PATCH: clarification without intended behavior change.
+- MINOR: compatible capability, protocol, command, template, or state-schema addition.
+- MAJOR: incompatible authority, lifecycle, persistence, task-packet, or runtime contract change.
 
-For each release record:
+For each release record the system-prompt, permissions, capabilities, schema/migration, CLI, sandbox, approval, and known-limit changes plus test/eval evidence.
 
-- system prompt changes;
-- permission changes;
-- tool policy changes;
-- state/schema changes;
-- eval results;
-- known issues.
+Operational snapshots carry a schema version. Schema v2 transactionally migrates supported v1 snapshots and retains exact pre-migration rows in `schema_migration_backups`; unresolved approval identity/scope becomes an explicit blocked recovery gate. Unsupported or inconsistent versions are rejected rather than guessed. Conversation-session compatibility is separate.
 
-Behavioral changes should not be merged without relevant eval coverage.
+Candidate Walter changes remain on isolated candidate branches. Release evidence follows the authority chain: trusted validation, independent review, Manager acceptance, then a human approval bound to the exact candidate and target. Approval does not merge or push. Behavioral changes need relevant deterministic tests and judgment evals before promotion.

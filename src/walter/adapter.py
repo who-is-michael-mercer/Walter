@@ -108,7 +108,7 @@ class DurableController:
         self.workspaces = workspaces
 
     def instructions(self):
-        return DURABLE_INSTRUCTIONS + "\nRun ID: " + self.run_id
+        return load_system_prompt() + "\n" + DURABLE_INSTRUCTIONS + "\nRun ID: " + self.run_id
 
     def inspect(self):
         return self.core.get_run(self.run_id)

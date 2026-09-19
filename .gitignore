@@ -10,6 +10,8 @@ node_modules/
 # Local orchestration scratch
 .local/
 scratch/
+.crush/
+.crushrc
 
 # Python build and test artifacts
 *.egg-info/

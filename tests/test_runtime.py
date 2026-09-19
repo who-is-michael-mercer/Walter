@@ -1,10 +1,11 @@
 import asyncio
 import json
-from types import SimpleNamespace
 
 import pytest
 
 pytest.importorskip("agents")
+
+from agents.tool_context import ToolContext
 
 from walter import runtime
 
@@ -55,6 +56,7 @@ def test_models_are_explicitly_wired_and_tracing_disabled(monkeypatch):
     assert [call["model"] for call in calls[1:]] == ["manager", "worker"]
     assert all(client["base_url"] == "https://openrouter.ai/api/v1" for client in clients)
     assert all(client["api_key"] == "test" for client in clients)
+    assert all(client["max_retries"] == 0 and client["timeout"] == 60.0 for client in clients)
     assert all(call["should_replay_reasoning_content"](object()) for call in calls[1:])
     assert all(not call["should_replay_reasoning_content"](None) for call in calls[1:])
     assert runtime._should_replay_reasoning_content(object(), "https://openrouter.ai/api/v1/")
@@ -64,10 +66,19 @@ def test_default_models_and_reasoning_context():
     config = runtime.RuntimeConfig.from_env({"OPENROUTER_API_KEY": "test"})
     assert config.provider == "openrouter"
     assert config.manager_model == "moonshotai/kimi-k3"
-    assert config.worker_model == "moonshotai/kimi-k3"
+    assert config.worker_model == "deepseek/deepseek-v4.1-flash"
     assert runtime._should_replay_reasoning_content(object(), config.base_url)
     assert not runtime._should_replay_reasoning_content(None, config.base_url)
     assert not runtime._should_replay_reasoning_content(object(), "http://localhost/v1")
+
+
+def test_worker_model_override_preserves_default_manager():
+    config = runtime.RuntimeConfig.from_env({
+        "OPENROUTER_API_KEY": "test",
+        "WALTER_WORKER_MODEL": runtime.PREFERRED_REASONING_MODEL,
+    })
+    assert config.worker_model == runtime.PREFERRED_REASONING_MODEL
+    assert config.manager_model == runtime.DEFAULT_MANAGER_MODEL
 
 
 def test_provider_client_is_reused(monkeypatch):
@@ -101,7 +112,7 @@ def test_manager_uses_manager_model_and_worker_uses_worker_model(monkeypatch):
 
     manager = runtime.build_walter()
     assert manager["model"] is manager_model
-    assert agents[0]["tools"] == [runtime.delegate_task]
+    assert agents[0]["tools"] == [runtime.delegate_task, runtime.read_reference]
 
 
 def test_manager_uses_durable_controller_when_supplied(monkeypatch):
@@ -160,8 +171,13 @@ def test_delegate_returns_mocked_structured_tool_continuation(monkeypatch):
     invoke = getattr(runtime.delegate_task, "on_invoke_tool", None)
     if invoke is None:
         pytest.skip("installed SDK does not expose tool invocation hook")
-    context = SimpleNamespace(tool_name="delegate_task", run_config=None)
     tool_input = json.dumps({"packet": packet.model_dump()})
+    context = ToolContext(
+        context=None,
+        tool_name="delegate_task",
+        tool_call_id="test_delegate_task",
+        tool_arguments=tool_input,
+    )
     result = asyncio.run(invoke(context, tool_input))
     payload = json.loads(result) if isinstance(result, str) else result.model_dump()
     assert payload["task_id"] == "t1"

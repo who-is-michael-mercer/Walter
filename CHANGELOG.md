@@ -11,6 +11,7 @@
 
 ### Changed
 
+- Made the standalone Python CLI the sole application entry point and removed repository editor-agent integration configuration.
 - Adopted the Master Blueprint's canonical task lifecycle and acceptance-only dependency semantics throughout executable doctrine and templates.
 - Separated Agents SDK conversation sessions from authoritative operational state and documented the current OpenRouter hosted-web limitation.
 - Guarded new CLI runs with a completion-criteria sentinel, provider preflight, deterministic resource closure, and OS-derived local operator audit identity.
@@ -25,7 +26,7 @@
 ### Changed
 
 - Renamed the Manager identity from `Agent Manager` to **Walter**.
-- Updated Codex entry instructions, charter, system prompt, and README to use Walter as the agent/product name while retaining `Manager` as the functional role.
+- Updated the then-existing editor entry instructions, charter, system prompt, and README to use Walter as the agent/product name while retaining `Manager` as the functional role.
 - Standardized the recommended local installation path as `~/Projects/Walter`.
 
 ## 1.0.0 — 2026-09-14

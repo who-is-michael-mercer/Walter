@@ -33,6 +33,53 @@ def accepted(core, rid, tid="a"):
     return artifact
 
 
+def test_specialist_admission_counts_durable_reviews_and_delegations(tmp_path):
+    database = tmp_path / "run.sqlite"
+    store = SQLiteStore(database)
+    core = Orchestrator(store)
+    run = core.create_run("bounded", ["accurate"], max_concurrent_specialists=1)
+    core.add_tasks(run.id, [task(), task("b")])
+    artifact = candidate(core, run.id)
+    review = core.start_review(run.id, artifact.id, "reviewer")
+    other_store = SQLiteStore(database)
+    other = Orchestrator(other_store)
+    with pytest.raises(GateError, match="concurrency"):
+        other.delegate(run.id, "b", "author-b")
+    assert other.get_run(run.id).tasks["b"].attempts == 0
+    with pytest.raises(GateError, match="still running"):
+        core.accept(run.id, "a", reason="cannot bypass pending review")
+    core.review(run.id, artifact.id, "reviewer", True, "passed", assignment_id=review.id)
+    other.delegate(run.id, "b", "author-b")
+    other_store.close()
+    store.close()
+
+
+def test_resume_releases_review_without_fabricating_verdict(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task()])
+    artifact = candidate(core, rid)
+    first = core.start_review(rid, artifact.id, "reviewer-one")
+    resumed = core.resume(rid)
+    assert resumed.tasks["a"].status == TaskStatus.REVIEWING
+    assert not resumed.reviews_in_flight
+    assert not resumed.artifacts[artifact.id].reviews
+    second = core.start_review(rid, artifact.id, "reviewer-two")
+    with pytest.raises(GateError, match="current assignment"):
+        core.review(rid, artifact.id, "reviewer-one", True, "stale pass", assignment_id=first.id)
+    with pytest.raises(GateError, match="current assignment"):
+        core.fail_review(rid, "a", first.id, FailureClass.TIMEOUT, "stale interruption")
+    assert core.get_run(rid).reviews_in_flight["a"].id == second.id
+
+
+@pytest.mark.parametrize("limits", [
+    {"max_concurrent_specialists": 0}, {"specialist_timeout_seconds": 0},
+    {"specialist_timeout_seconds": float("inf")}, {"specialist_timeout_seconds": float("nan")},
+])
+def test_execution_limits_reject_unbounded_values(limits):
+    with pytest.raises(ValueError):
+        Orchestrator(SQLiteStore()).create_run("bounded", ["accurate"], **limits)
+
+
 def test_dependency_requires_acceptance_and_completion_evidence(kernel):
     core, rid = kernel
     core.add_tasks(rid, [task(), task("b", ["a"])])

@@ -37,7 +37,7 @@ The intended progression is:
 ```text
 Current Walter
     ↓
-Codex-built bootstrap Walter
+Human-directed bootstrap Walter
     ↓
 Self-build-ready Walter
     ↓
@@ -1601,11 +1601,11 @@ Not before.
 
 # Part XIX — First Self-Build Boundary
 
-## 56. What Codex Builds
+## 56. What Bootstrap Development Builds
 
-Codex builds the machinery that makes self-development governable.
+Bootstrap development builds the machinery that makes self-development governable.
 
-Codex's assignment should end with:
+The bootstrap assignment should end with:
 
 - orchestration kernel;
 - durable state;

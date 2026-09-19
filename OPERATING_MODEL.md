@@ -31,7 +31,7 @@ Decompose by inspectable deliverable, stop at one specialist lane, and create on
 
 Each task declares required inputs, dependencies, capability profile, trusted checks, review policy, attempt/revision limits, acceptance criteria, and stop condition. A result is accepted for submission only from the current assignment ID and worker. Assignment history and candidate lineage remain durable.
 
-Developer revision is an explicit lifecycle: reject through classified failure, recover to a safe retry state, create a fresh candidate, atomically record `workspace.replaced`, then clean the old workspace. Silent rebinding is forbidden.
+Developer revision is an explicit lifecycle: reject through classified failure, recover to a safe retry state, freeze the old workspace, create a fresh candidate, and atomically record `workspace.replaced`. Retain the previous workspace as inspectable partial evidence through assignment history. Automatic retention cleanup is not implemented; eventual cleanup requires a separate authorized manual or external operation. Silent rebinding is forbidden.
 
 A worker may return `blocked` or `needs_revision` with useful partial work. Walter persists that assignment-bound result, records no candidate artifact, keeps dependents locked, classifies the cause (`MISSING_EVIDENCE`, `BAD_OUTPUT`, or `CAPABILITY_UNAVAILABLE` as appropriate), and recovers explicitly. Ordinary provisional results therefore never become generic `TOOL_FAILURE` records.
 

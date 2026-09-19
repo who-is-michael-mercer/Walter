@@ -31,6 +31,23 @@ class SandboxViolation(PermissionError):
     pass
 
 
+class WorkspaceDependencyMismatch(SandboxViolation):
+    """Authenticated retained grants require a different dependency environment."""
+
+    def __init__(self, bound: str, current: str, state_root: str):
+        self.bound = bound
+        self.current = current
+        self.state_root = state_root
+        super().__init__(
+            f"Workspace dependency environment mismatch: registry={state_root!r}, "
+            f"bound={bound!r}, current={current!r}. "
+            "Restore the bound environment to resume this registry, or start a new run with "
+            "--workspace-state-root .local/sandboxes-new using an unused directory. "
+            "Retain the original registry and candidate evidence; do not edit or rebind grants. "
+            "See docs/WORKSPACE_RETENTION.md."
+        )
+
+
 class SandboxUnavailable(RuntimeError):
     pass
 
@@ -99,7 +116,7 @@ SECRET_SUFFIXES = (".pem", ".p12", ".pfx")
 # mutate them.  A Manager must create a separate signed grant bound to an exact
 # human approval digest to authorize a safety-boundary candidate.
 SAFETY_PATHS = frozenset({
-    "AGENTS.md", "SYSTEM_PROMPT.md", "PERMISSIONS.md", "AGENT_CREATION.md",
+    "SYSTEM_PROMPT.md", "PERMISSIONS.md", "AGENT_CREATION.md",
     "QA_PROTOCOL.md", "FAILURE_RECOVERY.md", "TOOLS.md", "TASK_PROTOCOL.md",
     "OPERATING_MODEL.md", "STATE_MODEL.md", "CHARTER.md",
     "src/walter/sandbox.py", "src/walter/orchestration.py", "src/walter/models.py",
@@ -428,7 +445,6 @@ class WorkspaceManager:
         expected_root = self.state_root / ("candidate-" + grant.candidate_id)
         if (grant.repository != str(self.repository) or grant.root != str(expected_root) or
                 grant.branch != "walter-candidate/" + grant.candidate_id or
-                grant.dependency_root != str(self.dependency_root) or
                 not grant.run_id or not grant.task_id or not grant.worker_id or not grant.author_id or
                 grant.prohibited_roots != (str(self.repository),)):
             raise SandboxViolation("Workspace grant binding is invalid")
@@ -449,6 +465,8 @@ class WorkspaceManager:
         root = Path(grant.root)
         if root.parent != self.state_root or root.resolve() != root:
             raise SandboxViolation("Invalid workspace root")
+        if grant.dependency_root != str(self.dependency_root):
+            raise WorkspaceDependencyMismatch(grant.dependency_root, str(self.dependency_root), str(self.state_root))
 
     def _verify_worktree(self, grant: WorkspaceGrant):
         self._verify_grant_shape(grant)

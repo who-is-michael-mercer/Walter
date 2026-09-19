@@ -66,7 +66,7 @@ def test_one_shot_builds_manager_around_new_durable_run(monkeypatch, capsys):
     controller = Controller()
     observed = {}
 
-    def make_controller(goal):
+    def make_controller(goal, workspace_state_root=None):
         observed["goal"] = goal
         return controller
 
@@ -127,3 +127,61 @@ def test_main_reports_missing_run_as_friendly_domain_error(tmp_path, monkeypatch
     monkeypatch.setattr(cli.sys, "argv", ["walter", "run", "inspect", "missing-run"])
     with pytest.raises(SystemExit, match="Walter operation error"):
         cli.main()
+
+
+def test_explicit_registry_recovers_new_startup_without_mutating_retained_state(tmp_path, monkeypatch):
+    from walter.sandbox import WorkspaceManager, WorkspaceDependencyMismatch
+    setup_repository(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    old = tmp_path / "old-env"
+    (old / "bin").mkdir(parents=True)
+    (old / "bin/python").touch()
+    previous = WorkspaceManager(tmp_path, dependency_root=old)
+    grant = previous.create_candidate("previous-run", "task", "worker")
+    before = previous._manifest.read_bytes()
+    with pytest.raises(WorkspaceDependencyMismatch) as error:
+        cli._controller("blocked startup")
+    assert str(old) in str(error.value)
+    assert str(previous.state_root) in str(error.value)
+    store = cli._store()
+    assert store.list_runs() == []
+    store.close()
+    fresh = cli._controller("fresh startup", workspace_state_root=".local/fresh-registry")
+    run_id = fresh.run_id
+    assert fresh.workspaces.state_root == tmp_path / ".local/fresh-registry"
+    fresh.close()
+    cli._operations(["resume", run_id, "--workspace-state-root", ".local/fresh-registry"])
+    assert previous._manifest.read_bytes() == before
+    assert (tmp_path / grant.root).exists()
+    with pytest.raises(WorkspaceDependencyMismatch):
+        cli._controller("default still blocked")
+
+
+def test_default_registry_does_not_read_readiness_and_rejects_tampering(tmp_path, monkeypatch):
+    from walter.sandbox import SandboxViolation
+    setup_repository(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    readiness = tmp_path / ".local/readiness/retained"
+    readiness.mkdir(parents=True)
+    (readiness / "grants.json").write_text("invalid retained evidence")
+    controller = cli._controller("normal startup")
+    assert controller.workspaces.state_root == tmp_path / ".local/sandboxes"
+    controller.close()
+    (tmp_path / ".local/sandboxes/grants.json").write_text("tampered")
+    with pytest.raises(SandboxViolation, match="Invalid workspace grant manifest"):
+        cli._controller("must not fallback")
+    assert (readiness / "grants.json").read_text() == "invalid retained evidence"
+
+
+def test_workspace_registry_flag_and_containment(tmp_path, monkeypatch):
+    from walter.sandbox import SandboxViolation
+    setup_repository(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert cli._parser().parse_args(["--workspace-state-root", ".local/fresh", "goal"]).workspace_state_root == ".local/fresh"
+    with pytest.raises(SandboxViolation):
+        cli._controller("invalid", workspace_state_root=tmp_path.parent / "outside-registry")
+    target = tmp_path / ".local/target"
+    target.mkdir(parents=True)
+    (tmp_path / ".local/link").symlink_to(target, target_is_directory=True)
+    with pytest.raises(SandboxViolation, match="Symlinked"):
+        cli._controller("invalid", workspace_state_root=".local/link")

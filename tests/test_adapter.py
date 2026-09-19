@@ -44,7 +44,7 @@ def test_manager_tool_surface_has_no_trust_forging_tools():
         "apply_replan",
         "request_capability_change", "apply_capability_change",
         "request_approval", "request_candidate_approval", "authorize_candidate_action",
-        "finish_run",
+        "finish_run", "read_reference",
     }
     assert "passed" not in tools["validate_task"].params_json_schema["properties"]
     assert "evidence" not in tools["validate_task"].params_json_schema["properties"]
@@ -134,7 +134,7 @@ def test_review_records_fresh_identity_and_cannot_accept_by_itself(monkeypatch):
     assert not run.accepted_artifacts
 
 
-def test_developer_revision_gets_fresh_workspace_and_cleans_old_candidate(tmp_path, monkeypatch):
+def test_developer_revision_gets_fresh_workspace_and_preserves_old_candidate(tmp_path, monkeypatch):
     repository = tmp_path / "fixture"
     repository.mkdir()
     (repository / "README.md").write_text("# Fixture\n")
@@ -154,6 +154,9 @@ def test_developer_revision_gets_fresh_workspace_and_cleans_old_candidate(tmp_pa
     controller = DurableController(core, run.id, workspaces)
 
     async def candidate(**kwargs):
+        task = controller.inspect().tasks["task"]
+        workspaces.write_file(task.workspace_id, "partial.txt", "Useful partial work",
+                              worker_id=task.assignment.worker_id)
         return WorkerResult(task_id="task", status="completed", summary="candidate",
                             deliverable="bounded candidate")
 
@@ -168,9 +171,97 @@ def test_developer_revision_gets_fresh_workspace_and_cleans_old_candidate(tmp_pa
     current = controller.inspect()
     second = current.tasks["task"].workspace_id
     assert second != first
-    assert not first_root.exists()
+    assert (first_root / "partial.txt").read_text() == "Useful partial work"
+    assert workspaces.inspect_grant(first).read_only
     assert current.tasks["task"].status == "SUBMITTED"
     assert any(event.kind == "workspace.replaced" for event in core.store.events(run.id))
+
+
+@pytest.mark.parametrize("interrupt", ["timeout", "cancel"])
+def test_worker_interruption_is_durable_and_requires_explicit_recovery(tmp_path, monkeypatch, interrupt):
+    database = tmp_path / "run.sqlite"
+    core = Orchestrator(SQLiteStore(database))
+    run = core.create_run("bounded execution", ["result accepted"], specialist_timeout_seconds=0.02)
+    core.add_tasks(run.id, [TaskNode(packet=packet(), required_checks=["result_schema"])])
+    controller = DurableController(core, run.id)
+
+    async def scenario():
+        started = asyncio.Event()
+        async def stalled(**kwargs):
+            started.set()
+            await asyncio.Event().wait()
+        monkeypatch.setattr(controller, "_invoke", stalled)
+        pending = asyncio.create_task(controller.delegate("task"))
+        await started.wait()
+        if interrupt == "cancel":
+            pending.cancel()
+        with pytest.raises(TimeoutError if interrupt == "timeout" else asyncio.CancelledError):
+            await pending
+
+    asyncio.run(scenario())
+    controller.close()
+    with_store = SQLiteStore(database)
+    recovered = with_store.load(run.id)
+    assert recovered.tasks["task"].status == "FAILED"
+    assert recovered.tasks["task"].attempts == 1
+    assert recovered.failures[-1].classification == FailureClass.TIMEOUT
+    assert not recovered.accepted_artifacts and not recovered.recoveries
+    assert any(event.kind == "assignment.failed" for event in with_store.events(run.id))
+    with_store.close()
+
+
+def test_review_timeout_preserves_candidate_and_exhausts_bounded_attempts(monkeypatch):
+    from walter.orchestration import GateError
+    core = Orchestrator(SQLiteStore())
+    run = core.create_run("review deadline", ["result accepted"], specialist_timeout_seconds=0.01)
+    core.add_tasks(run.id, [TaskNode(packet=packet(), required_checks=["result_schema"], max_review_attempts=1)])
+    controller = DurableController(core, run.id)
+
+    async def author(**kwargs):
+        return WorkerResult(task_id="task", status="completed", summary="done", deliverable="preserved")
+    monkeypatch.setattr(controller, "_invoke", author)
+    artifact = asyncio.run(controller.delegate("task"))
+    controller.validate("task")
+
+    async def stalled(**kwargs):
+        await asyncio.Event().wait()
+    monkeypatch.setattr(controller, "_invoke", stalled)
+    with pytest.raises(TimeoutError):
+        asyncio.run(controller.review("task"))
+    current = controller.inspect()
+    assert current.tasks["task"].status == "REVIEWING"
+    assert current.artifacts[artifact.id].content == "preserved"
+    assert not current.artifacts[artifact.id].reviews
+    assert not current.reviews_in_flight
+    assert any(event.kind == "review.failed" for event in core.store.events(run.id))
+    with pytest.raises(GateError, match="attempt limit"):
+        asyncio.run(controller.review("task"))
+    with pytest.raises(GateError, match="Independent review required"):
+        core.accept(run.id, "task", reason="cannot skip exhausted review")
+
+
+def test_concurrent_delegation_rejects_excess_without_consuming_attempt(monkeypatch):
+    from walter.orchestration import GateError
+    core = Orchestrator(SQLiteStore())
+    run = core.create_run("bounded workers", ["result accepted"], max_concurrent_specialists=1)
+    core.add_tasks(run.id, [TaskNode(packet=packet(name)) for name in ("one", "two")])
+    controller = DurableController(core, run.id)
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+        async def stalled(**kwargs):
+            started.set()
+            await release.wait()
+            return WorkerResult(task_id="one", status="completed", summary="done", deliverable="candidate")
+        monkeypatch.setattr(controller, "_invoke", stalled)
+        first = asyncio.create_task(controller.delegate("one"))
+        await started.wait()
+        with pytest.raises(GateError, match="concurrency"):
+            await controller.delegate("two")
+        assert controller.inspect().tasks["two"].attempts == 0
+        release.set()
+        await first
+        await controller.delegate("two")
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("stale_outcome", ["completion", "error"])

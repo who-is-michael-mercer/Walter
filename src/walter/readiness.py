@@ -34,6 +34,7 @@ class ReadinessReport(BaseModel):
     task_id: str
     artifact_id: str
     workspace_id: str
+    workspace_state_root: str
     candidate_branch: str
     candidate_fingerprint: str
     candidate_diff_digest: str
@@ -84,11 +85,15 @@ def run_readiness_demo(
     """Run the harmless offline readiness fixture and retain its reviewable worktree.
 
     ``SandboxUnavailable`` is deliberately allowed to propagate.  A host-process
-    fallback would make a successful report misleading.
+    fallback would make a successful report misleading. Each default invocation
+    retains its own workspace manifest, so grants bound to a previous Python
+    environment do not prevent a fresh demo. The operational store stays durable.
     """
     repository = Path(repository).resolve(strict=True)
     database = Path(store_path) if store_path is not None else _default_store_path(repository)
-    workspace_manager = workspaces or WorkspaceManager(repository)
+    workspace_manager = workspaces or WorkspaceManager(
+        repository, state_root=repository / ".local/readiness" / uuid4().hex
+    )
     store = SQLiteStore(database)
     try:
         core = Orchestrator(store, manager_id="offline-readiness-manager")
@@ -149,6 +154,7 @@ def run_readiness_demo(
                 summary="Harmless isolated readiness marker added",
                 deliverable=json.dumps({
                     "workspace_id": grant.id,
+                    "workspace_state_root": str(workspace_manager.state_root),
                     "branch": grant.branch,
                     "fingerprint": fingerprint,
                     "diff_sha256": hashlib.sha256(candidate_diff.encode()).hexdigest(),
@@ -252,6 +258,7 @@ def run_readiness_demo(
             task_id=task_id,
             artifact_id=artifact.id,
             workspace_id=grant.id,
+            workspace_state_root=str(workspace_manager.state_root),
             candidate_branch=grant.branch,
             candidate_fingerprint=fingerprint,
             candidate_diff_digest=scope["candidate_diff_digest"],

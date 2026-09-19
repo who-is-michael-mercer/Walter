@@ -2,7 +2,7 @@
 
 ## Start and inspect
 
-Configure OpenRouter, then start an interactive or one-shot goal with `walter`. The CLI creates a durable run in `.local/walter-operations.db`; an optional Agents SDK conversation session remains in `.local/walter-sessions.db`.
+Configure OpenRouter, then start an interactive or one-shot goal with `walter`. Defaults are `moonshotai/kimi-k3` for the Manager and `deepseek/deepseek-v4.1-flash` for specialists; `WALTER_MODEL` and `WALTER_WORKER_MODEL` override them independently. The CLI creates a durable run in `.local/walter-operations.db`; an optional Agents SDK conversation session remains in `.local/walter-sessions.db`.
 
 ```bash
 walter "OBJECTIVE"
@@ -46,7 +46,7 @@ For candidate actions, use the dedicated request path so branch, base revision, 
 
 Opening a schema-v1 operational database migrates it transactionally to v2. Confirm a source row exists in `schema_migration_backups` for each migrated run and inspect blocked tasks for unresolved bare `approval_ids`. Repair one only by creating/locating the intended exact typed request and invoking `recover_legacy_approval_gate`; never infer missing scope from conversation history.
 
-Developer revisions require failure classification/recovery, a new candidate workspace, audited `workspace.replaced`, and old-worktree cleanup. Use validated `inspect_grant` output for trusted branch/base scope; do not read private workspace internals.
+Developer revisions require failure classification/recovery, freezing the old workspace, a new candidate workspace, and audited `workspace.replaced`. The old worktree remains inspectable partial evidence through assignment history. No automatic retention cleanup exists; eventual cleanup is a separate authorized manual or external operation after evidence-retention needs are addressed. Use validated `inspect_grant` output for trusted branch/base scope; do not read private workspace internals.
 
 For an assignment-bound capability request, inspect requested profile, reason, risk, task, assignment, and worker before invoking `request_capability_change`. Repository-read and developer requests create an exact Manager-owned workspace and include its ID in human approval scope. Developer tasks must already declare `compile`, `unittest`, or `pytest`, including when introduced through replan or capability change. After a human decision, `apply_capability_change` denies and cleans a rejected workspace or atomically/idempotently binds the approved profile/workspace and records `escalated`. It is safe to retry after restart. Redelegation reuses that workspace read-only for `repo_reader` and with bounded write/check tools for `developer_sandbox`.
 

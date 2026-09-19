@@ -7,7 +7,7 @@ import pytest
 from walter.adapter import DurableController
 from walter.orchestration import GateError, Orchestrator
 from walter.readiness import run_readiness_demo
-from walter.sandbox import CommandResult, WorkspaceManager
+from walter.sandbox import CommandResult, SandboxViolation, WorkspaceManager
 from walter.store import SQLiteStore
 
 
@@ -98,3 +98,41 @@ def test_real_readiness_uses_fail_closed_sandbox(tmp_path):
     repository = fixture_repository(tmp_path)
     report = run_readiness_demo(repository, store_path=tmp_path / "real.db")
     assert report.sandbox_validation["returncode"] == 0
+
+
+def test_default_readiness_retains_separate_manifests_across_environments(tmp_path, monkeypatch):
+    repository = fixture_repository(tmp_path)
+    old_environment = tmp_path / "old-environment"
+    (old_environment / "bin").mkdir(parents=True)
+    (old_environment / "bin/python").touch()
+    previous = WorkspaceManager(repository, dependency_root=old_environment)
+    previous.create_candidate("previous-run", "previous-task", "previous-author")
+    previous_manifest = previous.state_root / "grants.json"
+    original_manifest = previous_manifest.read_bytes()
+
+    with pytest.raises(SandboxViolation, match="Workspace dependency environment mismatch"):
+        WorkspaceManager(repository)
+
+    def execute(self, workspace_id, category, argv, *, worker_id=None, timeout=30):
+        self.inspect_grant(workspace_id, worker_id=worker_id)
+        return CommandResult(0, "syntax validation passed\n", "")
+
+    monkeypatch.setattr(WorkspaceManager, "run_command", execute)
+    reports = [run_readiness_demo(repository) for _ in range(2)]
+    assert reports[0].workspace_state_root != reports[1].workspace_state_root
+    assert previous_manifest.read_bytes() == original_manifest
+    with pytest.raises(SandboxViolation, match="Workspace dependency environment mismatch"):
+        WorkspaceManager(repository)
+
+    store = SQLiteStore(repository / ".local/walter-operations.db")
+    try:
+        for report in reports:
+            retained = WorkspaceManager(repository, state_root=report.workspace_state_root)
+            assert retained.inspect_grant(report.workspace_id).run_id == report.run_id
+            run = store.load(report.run_id)
+            assert report.approval_id not in run.approval_decisions
+            assert run.approvals[report.approval_id].status == "pending"
+            artifact = run.artifacts[report.artifact_id]
+            assert json.loads(artifact.content)["workspace_state_root"] == report.workspace_state_root
+    finally:
+        store.close()

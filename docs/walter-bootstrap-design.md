@@ -456,8 +456,8 @@ This system should remain in place even as autonomy increases.
 
 The progression is deliberate:
 
-1. Human + Codex build management kernel
-2. Human + Codex give Walter safe development capabilities
+1. Human-directed development builds the management kernel
+2. Human-directed development gives Walter safe development capabilities
 3. Walter manages worker runs in isolated worktrees
 4. Walter produces candidate patches
 5. Candidate outputs are reviewed independently

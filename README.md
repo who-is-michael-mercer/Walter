@@ -1,6 +1,6 @@
 # Walter
 
-Walter is a Manager-controlled orchestration system. It turns a human objective into a durable plan, delegates bounded specialist tasks, validates and reviews candidate outputs, and accepts only evidence-backed artifacts.
+Walter is a standalone Python application built on the OpenAI Agents SDK, with OpenRouter providing model access. Its Manager-controlled orchestration turns a human objective into a durable plan, delegates bounded specialist tasks, validates and reviews candidate outputs, and accepts only evidence-backed artifacts. Run it through the `walter` CLI; no editor integration or custom-agent configuration is required.
 
 > Walter manages work. Walter does not perform specialist deliverables himself.
 
@@ -32,11 +32,11 @@ Set an OpenRouter key in the environment or a gitignored `.env`:
 OPENROUTER_API_KEY=your_openrouter_key_here
 WALTER_MODEL_PROVIDER=openrouter
 WALTER_MODEL=moonshotai/kimi-k3
-WALTER_WORKER_MODEL=moonshotai/kimi-k3
+WALTER_WORKER_MODEL=deepseek/deepseek-v4.1-flash
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 ```
 
-OpenRouter is the only configured provider. `researcher` maps to the Agents SDK hosted `WebSearchTool`; compatibility through OpenRouter's chat-completions endpoint is provider-dependent and is not established by the offline suite. Research must block honestly if a live provider rejects that hosted tool. Live provider tests are opt-in.
+OpenRouter is the only configured provider. The defaults are Kimi K3 for the Manager and DeepSeek V4.1 Flash for specialists, including reviewers; the two environment overrides are independent. Tiny live comparisons and their limits are recorded in `docs/IMPLEMENTATION_STATE.md`. `researcher` maps to the Agents SDK hosted `WebSearchTool`; compatibility through OpenRouter's chat-completions endpoint is provider-dependent and is not established by the offline suite. Research must block honestly if a live provider rejects that hosted tool. Live provider tests are opt-in.
 
 Provider trace export and sensitive trace payloads remain disabled. The accepted `--trace-sensitive` option is a reserved compatibility no-op; CLI output labels workflow identifiers as `Local trace ID (provider export disabled)`.
 
@@ -51,6 +51,8 @@ walter "Implement a bounded objective"
 ```
 
 Conversation continuity lives in `.local/walter-sessions.db`. Authoritative run/task/artifact/approval state lives separately in `.local/walter-operations.db`; clearing a conversation does not erase operational truth.
+
+Both Manager entry points load the compact `SYSTEM_PROMPT.md` kernel; detailed policy is available through the fixed-file `read_reference` tool. Durable specialists receive only their task packet, resolved declared inputs and accepted upstream artifacts, plus applicable revision evidence. The context envelope rejects stale inputs and oversized content rather than silently omitting evidence. Whole run history is not copied into specialist context.
 
 Inspect and operate durable runs:
 
@@ -72,6 +74,8 @@ New CLI runs begin with a sentinel criterion that cannot satisfy completion. The
 Operational schema v2 adds typed approval lifecycles and gates. Opening a v1 database migrates snapshots transactionally and retains exact source snapshots in `schema_migration_backups`; ambiguous legacy task approval IDs remain blocked until the Manager calls `recover_legacy_approval_gate` with an exact typed request.
 
 A worker that returns `blocked` or `needs_revision` produces a durable provisional result, not a candidate artifact. It cannot unlock dependencies and is classified/recovered without being mislabeled as a tool failure. A typed capability request carries requested profile, reason, and risk through `pending`, `approved`, `denied`, and `escalated` states. Repository-read and developer requests bind exact Manager-created workspaces into the approval scope. Applying an approved request atomically and idempotently updates the task capability/workspace and records `escalated`; rejection grants nothing and cleans the pending workspace. Redelegation reuses the approved workspace with read-only tools for `repo_reader` or bounded write/check tools for `developer_sandbox`. Developer tasks must declare `compile`, `unittest`, or `pytest` at planning, replanning, and capability change. Model-facing replans are likewise always persisted behind exact human approval, even though trusted programmatic callers may use the low-level core for authorized low-impact replans.
+
+Recovered developer revisions receive a fresh candidate workspace. The previous workspace is frozen and retained as inspectable partial evidence in assignment history. There is no automatic retention cleanup; eventual removal requires a separate authorized manual or external cleanup step.
 
 Run verification with:
 

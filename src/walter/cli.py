@@ -13,10 +13,19 @@ from dotenv import load_dotenv
 
 from .runtime import RuntimeConfig, RuntimeConfigurationError, build_walter
 from .adapter import INITIAL_COMPLETION_CRITERION
+from .sandbox import SandboxViolation
 
 
 DEFAULT_SESSION = "main"
 DEFAULT_MAX_TURNS = 30
+
+
+def _workspace_option(parser):
+    parser.add_argument(
+        "--workspace-state-root", default=None,
+        help="Repository-contained workspace registry (default: .local/sandboxes). "
+             "For resume, select the original run's registry; an unused path starts fresh evidence.",
+    )
 
 
 def _session_db() -> str:
@@ -57,6 +66,7 @@ def _parser() -> argparse.ArgumentParser:
             "remain disabled in this runtime."
         ),
     )
+    _workspace_option(parser)
     return parser
 
 
@@ -95,9 +105,9 @@ async def _execute(
     return result, workflow_trace.trace_id
 
 
-async def _run_once(goal: str, session_id: str | None, max_turns: int) -> None:
+async def _run_once(goal: str, session_id: str | None, max_turns: int, workspace_state_root=None) -> None:
     RuntimeConfig.from_env()  # Validate before creating durable operational state.
-    controller = _controller(goal)
+    controller = _controller(goal, workspace_state_root=workspace_state_root)
     session = None
     try:
         session = SQLiteSession(session_id, _session_db()) if session_id else None
@@ -113,7 +123,7 @@ async def _run_once(goal: str, session_id: str | None, max_turns: int) -> None:
         controller.close()
 
 
-async def _run_interactive(session_id: str, max_turns: int) -> None:
+async def _run_interactive(session_id: str, max_turns: int, workspace_state_root=None) -> None:
     session = SQLiteSession(session_id, _session_db())
 
     print(f"Walter ready. Session: {session_id}")
@@ -140,7 +150,7 @@ async def _run_interactive(session_id: str, max_turns: int) -> None:
             controller = None
             try:
                 RuntimeConfig.from_env()  # Never orphan a run on missing provider configuration.
-                controller = _controller(goal)
+                controller = _controller(goal, workspace_state_root=workspace_state_root)
                 _, trace_id = await _execute(
                     build_walter(controller), goal, session=session,
                     session_id=session_id, max_turns=max_turns,
@@ -151,6 +161,8 @@ async def _run_interactive(session_id: str, max_turns: int) -> None:
                 print("\nRun interrupted.")
             except RuntimeConfigurationError as exc:
                 print(f"Walter configuration error: {exc}")
+            except SandboxViolation as exc:
+                print(f"Walter workspace error: {exc}")
             finally:
                 if controller is not None:
                     controller.close()
@@ -166,16 +178,17 @@ def _store():
     return SQLiteStore(directory / "walter-operations.db")
 
 
-def _controller(goal=None, run_id=None):
+def _controller(goal=None, run_id=None, workspace_state_root=None):
     from .adapter import DurableController
     from .orchestration import Orchestrator
     from .sandbox import WorkspaceManager
+    manager = WorkspaceManager(Path.cwd(), state_root=workspace_state_root)
     store = _store()
     try:
         core = Orchestrator(store)
         if run_id is None:
             run_id = core.create_run(goal, [INITIAL_COMPLETION_CRITERION]).id
-        return DurableController(core, run_id, WorkspaceManager(Path.cwd()))
+        return DurableController(core, run_id, manager)
     except Exception:
         store.close()
         raise
@@ -190,8 +203,8 @@ def _print_outcome(controller):
         print("Run is not complete. Inspect durable tasks, blockers, and approvals with walter run inspect " + run.id)
 
 
-async def _resume(run_id, max_turns):
-    controller = _controller(run_id=run_id)
+async def _resume(run_id, max_turns, workspace_state_root=None):
+    controller = _controller(run_id=run_id, workspace_state_root=workspace_state_root)
     try:
         controller.core.resume(run_id)
         _print_outcome(controller)
@@ -199,9 +212,9 @@ async def _resume(run_id, max_turns):
         controller.close()
 
 
-async def _resume_and_execute(run_id, max_turns):
+async def _resume_and_execute(run_id, max_turns, workspace_state_root=None):
     RuntimeConfig.from_env()  # Validate before recording a resume mutation.
-    controller = _controller(run_id=run_id)
+    controller = _controller(run_id=run_id, workspace_state_root=workspace_state_root)
     try:
         controller.core.resume(run_id)
         await _execute(build_walter(controller),
@@ -225,6 +238,7 @@ def _operations(argv):
         command = commands.add_parser(name)
         command.add_argument("run_id")
         if name == "resume":
+            _workspace_option(command)
             command.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
             command.add_argument("--execute", action="store_true",
                                  help="After offline recovery, invoke the configured Manager model.")
@@ -242,7 +256,7 @@ def _operations(argv):
         return
     if args.command == "resume":
         target = _resume_and_execute if args.execute else _resume
-        asyncio.run(target(args.run_id, args.max_turns))
+        asyncio.run(target(args.run_id, args.max_turns, args.workspace_state_root))
         return
     store = _store()
     try:
@@ -267,7 +281,7 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "run":
         try:
             _operations(sys.argv[2:])
-        except (KeyError, ValueError, RuntimeError) as exc:
+        except (KeyError, ValueError, RuntimeError, SandboxViolation) as exc:
             raise SystemExit(f"Walter operation error: {exc}") from exc
         return
     args = _parser().parse_args()
@@ -279,11 +293,13 @@ def main() -> None:
     goal = " ".join(args.goal).strip()
     try:
         if goal:
-            asyncio.run(_run_once(goal, args.session, args.max_turns))
+            asyncio.run(_run_once(goal, args.session, args.max_turns, args.workspace_state_root))
             return
-        asyncio.run(_run_interactive(args.session or DEFAULT_SESSION, args.max_turns))
+        asyncio.run(_run_interactive(args.session or DEFAULT_SESSION, args.max_turns, args.workspace_state_root))
     except RuntimeConfigurationError as exc:
         raise SystemExit(f"Walter configuration error: {exc}") from exc
+    except SandboxViolation as exc:
+        raise SystemExit(f"Walter workspace error: {exc}") from exc
 
 
 if __name__ == "__main__":

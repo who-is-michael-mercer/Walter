@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import asdict
+from pathlib import Path
 from uuid import uuid4
 
 from agents import Runner, RunConfig
@@ -13,6 +14,17 @@ from pydantic import BaseModel
 from . import runtime
 from .contracts import TaskPacket, WorkerResult
 from .usage_model import UsageRecordingModel
+
+
+def load_system_prompt() -> str:
+    """Load the repo-root SYSTEM_PROMPT.md and return its stripped text."""
+    prompt_path = Path(__file__).resolve().parents[2] / "SYSTEM_PROMPT.md"
+    if not prompt_path.exists():
+        raise RuntimeError(
+            f"Walter system prompt not found at {prompt_path}. "
+            "Run Walter from an editable checkout of the repository."
+        )
+    return prompt_path.read_text(encoding="utf-8").strip()
 
 
 class ReviewResult(BaseModel):

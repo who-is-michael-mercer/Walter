@@ -15,6 +15,7 @@ from walter.orchestration import Orchestrator
 from walter.sandbox import WorkspaceManager
 from walter.store import SQLiteStore
 from walter.adapter import workspace_tools
+from walter.adapter import load_system_prompt
 
 
 def packet(task_id="task"):
@@ -448,3 +449,20 @@ def test_repo_reader_escalation_reuses_exact_workspace_with_read_only_tools(tmp_
     asyncio.run(controller.delegate("task"))
     assert observed["tools"] == {"read_file", "list_files", "inspect_diff", "workspace_status"}
     assert controller.inspect().tasks["task"].workspace_id == scope["workspace_id"]
+
+
+def test_load_system_prompt_returns_repo_prompt_stripped_and_non_empty():
+    prompt = load_system_prompt()
+    repo_prompt = (Path(__file__).resolve().parents[1] / "SYSTEM_PROMPT.md").read_text(
+        encoding="utf-8"
+    )
+    assert prompt == repo_prompt.strip()
+    assert prompt
+
+
+def test_load_system_prompt_missing_file_raises_runtime_error(monkeypatch, tmp_path):
+    fake_module = tmp_path / "src" / "walter" / "adapter.py"
+    fake_module.parent.mkdir(parents=True)
+    monkeypatch.setattr("walter.adapter.Path", lambda *_: fake_module)
+    with pytest.raises(RuntimeError, match="Walter system prompt not found"):
+        load_system_prompt()

@@ -28,6 +28,7 @@ Runtime config comes from a gitignored `.env` (see `.env.example`): `OPENROUTER_
 
 - `src/walter/orchestration.py` — deterministic kernel: lifecycle, acceptance, approvals, authority. The model proposes; the kernel authorizes.
 - `src/walter/adapter.py` — Agents SDK boundary and Manager/worker tools; `runtime.py` wires `build_walter`, `cli.py` is the `walter` entrypoint.
+- The durable Manager's instructions are the repo-root `SYSTEM_PROMPT.md` plus a short operational appendix and the run ID (`DurableController.instructions()`).
 - `src/walter/sandbox.py` — fail-closed Bubblewrap isolation for candidate worktrees.
 - `src/walter/store.py` / `models.py` — atomic SQLite snapshots, append-only events, durable records.
 - `src/walter/readiness.py` — offline self-build readiness fixture.

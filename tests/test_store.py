@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import pytest
-from walter.contracts import TaskPacket
+from walter.contracts import TaskPacket, WorkerResult
 from walter.models import ApprovalStatus, Event, ModelUsageRecord, TaskNode, TaskStatus
 from walter.orchestration import GateError, Orchestrator
 from walter.store import ConcurrentUpdate, SQLiteStore
@@ -72,6 +72,46 @@ def test_usage_records_explicitly_mark_unknown_usage(tmp_path):
     assert usage.output_tokens is None
     assert usage.total_tokens is None
     store.close()
+
+
+def test_final_usage_persists_after_completion_without_reopening_run(tmp_path):
+    path = tmp_path / "completed-usage.db"
+    store = SQLiteStore(path)
+    core = Orchestrator(store)
+    run = core.create_run("objective", ["criterion"])
+    task = TaskNode(packet=TaskPacket(
+        task_id="task-1", role="writer", objective="Write a report",
+        deliverable="report", acceptance_criteria=["criterion"], stop_condition="deliver",
+    ))
+    core.add_tasks(run.id, [task])
+    assignment = core.delegate(run.id, task.id, "worker-1")
+    core.start(run.id, task.id)
+    artifact = core.submit(run.id, task.id, assignment.id, "worker-1", WorkerResult(
+        task_id=task.id, status="completed", summary="done", deliverable="report",
+    ))
+    core.review(run.id, artifact.id, "reviewer-1", True, "Criterion verified")
+    core.accept(run.id, task.id, reason="Review passed")
+    completed = core.complete(run.id, "Final report", criterion_evidence={"criterion": [artifact.id]})
+    completed_events = store.events(run.id)
+
+    record = core.record_usage(run.id, provider="openrouter", model="test-model",
+                               role="manager", raw_usage={"input_tokens": 3, "output_tokens": 2})
+    with pytest.raises(GateError, match="Run is terminal"):
+        core.register_input(run.id, "late-source", "must not be registered")
+    store.close()
+
+    reopened = SQLiteStore(path)
+    saved = reopened.load(run.id)
+    assert saved.usage_records == [record]
+    assert saved.model_dump(exclude={"usage_records", "version", "event_cursor", "updated_at"}) == completed.model_dump(
+        exclude={"usage_records", "version", "event_cursor", "updated_at"})
+    assert saved.version == completed.version + 1
+    assert saved.event_cursor == completed.event_cursor + 1
+    events = reopened.events(run.id)
+    assert events[:-1] == completed_events
+    assert events[-1].kind == "model.usage.recorded"
+    assert events[-1].data["usage"] == record.model_dump(mode="json")
+    reopened.close()
 
 
 def test_optimistic_lock_and_atomic_rollback(tmp_path):

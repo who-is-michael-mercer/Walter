@@ -268,6 +268,13 @@ def build_walter(controller=None) -> Agent:
 
     config = RuntimeConfig.from_env()
     manager_model, _ = build_models(config)
+    if controller is not None:
+        from .usage_model import UsageRecordingModel
+
+        manager_model = UsageRecordingModel(
+            manager_model, controller.core, controller.run_id,
+            provider=config.provider, model=config.manager_model, role="manager",
+        )
     return _agent(
         name="Walter",
         instructions=(_walter_instructions() if controller is None else controller.instructions()),

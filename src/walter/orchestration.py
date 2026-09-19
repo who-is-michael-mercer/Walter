@@ -136,12 +136,14 @@ class Orchestrator:
         else:
             record = record.model_copy(update={"run_id": run_id})
 
-        def operation(run, events):
-            run.usage_records.append(record.model_copy(deep=True))
-            self._event(run, events, "model.usage.recorded", usage=record.model_dump(mode="json"))
-            return record.model_copy(deep=True)
-
-        return self._mutate(run_id, operation)
+        # A final model response can arrive after finish_run completes the run.
+        # Append accounting only; all operational mutations retain _mutate's gate.
+        run = self.get_run(run_id)
+        events = []
+        run.usage_records.append(record.model_copy(deep=True))
+        self._event(run, events, "model.usage.recorded", usage=record.model_dump(mode="json"))
+        self.store.save(run, events, run.version)
+        return record.model_copy(deep=True)
 
     def _mutate(self, run_id: str, operation: Callable):
         run = self.get_run(run_id)

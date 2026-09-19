@@ -107,6 +107,9 @@ def test_manager_uses_manager_model_and_worker_uses_worker_model(monkeypatch):
 
 def test_manager_uses_durable_controller_when_supplied(monkeypatch):
     class Controller:
+        core = object()
+        run_id = "run-test"
+
         def instructions(self):
             return "durable instructions"
 

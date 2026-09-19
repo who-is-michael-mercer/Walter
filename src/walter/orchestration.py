@@ -188,12 +188,19 @@ class Orchestrator:
             if key in visited:
                 return
             visiting.add(key)
-            for dep in run.tasks[key].packet.dependencies:
+            packet = run.tasks[key].packet
+            for dep in [*packet.dependencies, *packet.required_inputs]:
                 if dep in run.tasks:
                     if run.tasks[dep].status in {TaskStatus.CANCELLED, TaskStatus.REPLACED}:
                         raise GateError("Dependency references retired task")
                     visit(dep)
-                elif dep not in run.artifacts:
+                elif dep in run.artifacts:
+                    producer = run.artifacts[dep].task_id
+                    if producer not in run.tasks:
+                        raise GateError("Artifact references unknown producer")
+                    if run.tasks[producer].status not in {TaskStatus.CANCELLED, TaskStatus.REPLACED}:
+                        visit(producer)
+                elif dep in packet.dependencies:
                     raise GateError(f"Unknown dependency {dep}")
             visiting.remove(key)
             visited.add(key)
@@ -201,14 +208,57 @@ class Orchestrator:
             if task.status not in {TaskStatus.CANCELLED, TaskStatus.REPLACED}:
                 visit(key)
 
+    def _input_artifact_ids(self, run, task, visiting=None, checked=None):
+        """Resolve declared inputs and verify their complete canonical lineage."""
+        visiting = set() if visiting is None else visiting
+        checked = set() if checked is None else checked
+        inputs = []
+        for value in [*task.packet.dependencies, *task.packet.required_inputs]:
+            if value in run.tasks:
+                upstream = run.tasks[value]
+                if upstream.status != TaskStatus.ACCEPTED or not upstream.artifact_ids:
+                    raise GateError("Input task is not accepted")
+                artifact_id = upstream.artifact_ids[-1]
+            elif value in run.artifacts:
+                artifact_id = value
+            elif value in run.available_inputs and value not in task.packet.dependencies:
+                continue
+            else:
+                raise GateError("Required input is unavailable")
+            self._validate_accepted_artifact(run, artifact_id, visiting, checked)
+            if artifact_id not in inputs:
+                inputs.append(artifact_id)
+        return inputs
+
+    def _validate_accepted_artifact(self, run, artifact_id, visiting=None, checked=None):
+        visiting = set() if visiting is None else visiting
+        checked = set() if checked is None else checked
+        if artifact_id in visiting:
+            raise GateError("Artifact input cycle")
+        if artifact_id in checked:
+            return
+        artifact = run.artifacts.get(artifact_id)
+        task = run.tasks.get(artifact.task_id) if artifact else None
+        if (not artifact or not task or artifact.run_id != run.id or
+                artifact.status != "accepted" or artifact_id not in run.accepted_artifacts or
+                task.status != TaskStatus.ACCEPTED or task.artifact_ids[-1:] != [artifact_id]):
+            raise GateError("Input artifact is no longer canonical and accepted")
+        visiting.add(artifact_id)
+        inputs = self._input_artifact_ids(run, task, visiting, checked)
+        if set(artifact.input_artifact_ids) != set(inputs):
+            raise GateError("Artifact input provenance does not match declared inputs")
+        visiting.remove(artifact_id)
+        checked.add(artifact_id)
+
+    def _validate_task_inputs(self, run, task):
+        inputs = self._input_artifact_ids(run, task)
+        if not task.artifact_ids or set(run.artifacts[task.artifact_ids[-1]].input_artifact_ids) != set(inputs):
+            raise GateError("Candidate input provenance does not match declared inputs")
+
     def _ready(self, run, task):
-        for dep in task.packet.dependencies:
-            if dep in run.tasks:
-                if run.tasks[dep].status != TaskStatus.ACCEPTED:
-                    return False
-            elif dep not in run.accepted_artifacts:
-                return False
-        if any(value not in run.available_inputs and value not in run.accepted_artifacts for value in task.packet.required_inputs):
+        try:
+            self._input_artifact_ids(run, task)
+        except GateError:
             return False
         if task.capability == CapabilityProfile.DEVELOPER_SANDBOX and not task.workspace_id:
             return False
@@ -360,10 +410,10 @@ class Orchestrator:
                 raise GateError("Submission does not match the current worker assignment")
             if result.task_id != task_id or result.status != "completed" or not result.deliverable.strip():
                 raise GateError("Expected matching completed candidate; route blockers through fail")
+            inputs = self._input_artifact_ids(run, task)
             self._transition(run, events, task, TaskStatus.SUBMITTED, "Candidate received")
             if task.capability == CapabilityProfile.DEVELOPER_SANDBOX and not workspace_fingerprint:
                 raise GateError("Developer candidate requires observed workspace fingerprint")
-            inputs = [a for dep in task.packet.dependencies for a in (run.tasks[dep].artifact_ids[-1:] if dep in run.tasks else [dep])]
             artifact = Artifact(run_id=run_id, task_id=task_id, worker_id=worker_id, content=result.deliverable, content_digest=hashlib.sha256(result.deliverable.encode()).hexdigest(), workspace_fingerprint=workspace_fingerprint, version=len(task.artifact_ids) + 1, predecessor_id=task.artifact_ids[-1] if task.artifact_ids else None, input_artifact_ids=inputs)
             task.result = result.model_copy(deep=True)
             task.artifact_ids.append(artifact.id)
@@ -482,6 +532,7 @@ class Orchestrator:
                 raise GateError("At least one external validation or review is required")
             if not self._ready(run, task):
                 raise GateError("Inputs are no longer accepted")
+            self._validate_task_inputs(run, task)
             decision = AcceptanceDecision(action="ACCEPT", reason=reason, actor_id=self.manager_id,
                 context=f"Acceptance of artifact {artifact.id} for task {task_id}",
                 options_considered=["ACCEPT", "REVISE", "REJECT", "REPLACE"],
@@ -934,10 +985,19 @@ class Orchestrator:
             active = [t for t in run.tasks.values() if t.status != TaskStatus.CANCELLED]
             if not active or any(t.status != TaskStatus.ACCEPTED for t in active) or run.unresolved_issues:
                 raise GateError("Required work remains unresolved")
+            self._graph(run)
+            checked = set()
+            for task in active:
+                if not task.artifact_ids or not self._ready(run, task):
+                    raise GateError("Accepted task inputs are no longer valid")
+                self._validate_accepted_artifact(run, task.artifact_ids[-1], checked=checked)
             if any(request.required and request.status == ApprovalStatus.PENDING for request in run.approvals.values()):
                 raise GateError("Outstanding required approval gate")
             if set(criterion_evidence) != set(run.plan.completion_criteria) or any(not ids or not set(ids).issubset(run.accepted_artifacts) for ids in criterion_evidence.values()):
                 raise GateError("Every completion criterion requires accepted artifact evidence")
+            for ids in criterion_evidence.values():
+                for artifact_id in ids:
+                    self._validate_accepted_artifact(run, artifact_id, checked=checked)
             if not final_result.strip():
                 raise GateError("Final result required")
             run.final_result, run.status, run.plan.status = final_result, "completed", "completed"

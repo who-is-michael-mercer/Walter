@@ -1,6 +1,6 @@
 import pytest
 from walter.contracts import CapabilityRequestPayload, TaskPacket, WorkerResult
-from walter.models import (ApprovalStatus, CapabilityProfile, CapabilityRequestStatus,
+from walter.models import (ApprovalStatus, CapabilityProfile, CapabilityRequestStatus, Event,
     FailureClass, ReplanProposal, TaskNode, TaskStatus)
 from walter.orchestration import GateError, Orchestrator
 from walter.store import SQLiteStore
@@ -694,3 +694,107 @@ def test_recovery_revise_and_replace_record_blockers(kernel):
     assert decision.action == "REPLACE"
     assert run.tasks["a"].status == TaskStatus.REPLACED
     assert run.tasks["a"].blocker == "Worker replacement required"
+
+
+def tamper(core, rid, mutate):
+    """Apply a direct store mutation simulating provenance tampering."""
+    run = core.get_run(rid)
+    mutate(run)
+    core.store.save(run, [Event(run_id=rid, kind="test.tamper")], run.version)
+
+
+def test_submit_records_required_inputs_provenance(kernel):
+    core, rid = kernel
+    c = task("c")
+    c.packet.required_inputs = ["b"]
+    core.add_tasks(rid, [task(), task("b", ["a"]), c])
+    a = accepted(core, rid, "a")
+    b = candidate(core, rid, "b")
+    assert core.get_run(rid).artifacts[b.id].input_artifact_ids == [a.id]
+    core.review(rid, b.id, "reviewer", True, "Checked the report against sources")
+    core.accept(rid, "b", "manager", "Criteria checked")
+    assert core.get_run(rid).tasks["c"].status == TaskStatus.READY
+    c_art = candidate(core, rid, "c")
+    assert core.get_run(rid).artifacts[c_art.id].input_artifact_ids == [b.id]
+
+
+def test_submit_records_artifact_id_required_input_provenance(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task()])
+    a = accepted(core, rid, "a")
+    b = task("b")
+    b.packet.required_inputs = [a.id]
+    proposal = ReplanProposal(base_revision=0, trigger="Discovered follow-up", evidence=["Accepted report"], add=[b])
+    core.propose_replan(rid, proposal)
+    core.apply_replan(rid, proposal.id)
+    assert core.get_run(rid).tasks["b"].status == TaskStatus.READY
+    b_art = candidate(core, rid, "b")
+    assert core.get_run(rid).artifacts[b_art.id].input_artifact_ids == [a.id]
+
+
+def test_forged_or_dropped_artifact_lineage_rejected_at_acceptance(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task(), task("b", ["a"])])
+    a = accepted(core, rid, "a")
+    b = candidate(core, rid, "b")
+    core.review(rid, b.id, "reviewer", True, "Checked the report against sources")
+    tamper(core, rid, lambda run: run.artifacts[b.id].input_artifact_ids.append("forged-artifact"))
+    with pytest.raises(GateError):
+        core.accept(rid, "b", "manager", "Undeclared input claimed")
+    tamper(core, rid, lambda run: run.artifacts[b.id].input_artifact_ids.clear())
+    with pytest.raises(GateError):
+        core.accept(rid, "b", "manager", "Declared input dropped")
+    tamper(core, rid, lambda run: run.artifacts[b.id].input_artifact_ids.append(a.id))
+    core.accept(rid, "b", "manager", "Canonical lineage restored")
+
+
+def test_stale_unaccepted_input_rejected(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task()])
+    a = candidate(core, rid)
+    b = task("b")
+    b.packet.required_inputs = [a.id]
+    proposal = ReplanProposal(base_revision=0, trigger="Discovered follow-up", evidence=["Needs source"], add=[b])
+    core.propose_replan(rid, proposal)
+    core.apply_replan(rid, proposal.id)
+    assert core.get_run(rid).tasks["b"].status == TaskStatus.PLANNED
+    with pytest.raises(GateError):
+        core.delegate(rid, "b", "worker")
+    core.review(rid, a.id, "reviewer", True, "Checked the report against sources")
+    core.accept(rid, "a", "manager", "Criteria checked")
+    assert core.get_run(rid).tasks["b"].status == TaskStatus.READY
+
+
+def test_accept_revalidates_stale_input(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task(), task("b", ["a"])])
+    a = accepted(core, rid, "a")
+    b = candidate(core, rid, "b")
+    core.review(rid, b.id, "reviewer", True, "Checked the report against sources")
+    def invalidate(run):
+        run.artifacts[a.id].status = "superseded"
+        run.accepted_artifacts.remove(a.id)
+    tamper(core, rid, invalidate)
+    with pytest.raises(GateError):
+        core.accept(rid, "b", "manager", "Upstream no longer canonical")
+
+
+def test_graph_traverses_required_inputs(kernel):
+    core, rid = kernel
+    a = task()
+    a.packet.required_inputs = ["b"]
+    with pytest.raises(GateError):
+        core.add_tasks(rid, [a, task("b", ["a"])])
+    assert core.get_run(rid).tasks == {}
+
+
+def test_complete_revalidates_accepted_lineage(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task(), task("b", ["a"])])
+    a = accepted(core, rid, "a")
+    b = accepted(core, rid, "b")
+    tamper(core, rid, lambda run: run.artifacts[a.id].input_artifact_ids.append("forged-artifact"))
+    with pytest.raises(GateError):
+        core.complete(rid, "done", criterion_evidence={"accurate": [b.id]})
+    tamper(core, rid, lambda run: run.artifacts[a.id].input_artifact_ids.clear())
+    core.complete(rid, "done", criterion_evidence={"accurate": [b.id]})

@@ -551,17 +551,27 @@ class Orchestrator:
                 if not self._ready(run, task):
                     raise GateError("Retry gates unresolved")
                 self._transition(run, events, task, TaskStatus.READY, reason)
+                task.blocker = None
                 self._event(run, events, "retry.scheduled", task_id=task.id, failure_id=failure.id, next_attempt=task.attempts + 1)
             elif action == "REVISE":
                 task.revisions += 1
                 self._transition(run, events, task, TaskStatus.REVISION_REQUIRED, reason)
+                task.blocker = failure.evidence
             elif action == "REPLACE":
                 self._transition(run, events, task, TaskStatus.REPLACED, reason)
+                task.blocker = "Worker replacement required"
                 self._event(run, events, "worker.replaced", task_id=task.id, failure_id=failure.id,
                     worker_id=task.assignment.worker_id if task.assignment else None)
-            elif action == "ESCALATE" and kind == FailureClass.CAPABILITY_UNAVAILABLE:
+            elif action == "ESCALATE":
                 self._transition(run, events, task, TaskStatus.BLOCKED, reason)
-                task.blocker = "Capability escalation pending"
+                task.blocker = {
+                    FailureClass.CAPABILITY_UNAVAILABLE: "Capability escalation pending",
+                    FailureClass.UNSUPPORTED_CAPABILITY: "Unsupported capability requires Manager escalation",
+                    FailureClass.TOOL_FAILURE: "Tool failure requires Manager escalation",
+                }[kind]
+            elif action == "REPLAN":
+                self._transition(run, events, task, TaskStatus.BLOCKED, reason)
+                task.blocker = "Manager replan required"
             if task.artifact_ids:
                 rejected = run.artifacts[task.artifact_ids[-1]]
                 rejected.status = "rejected"

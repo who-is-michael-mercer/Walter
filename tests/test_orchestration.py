@@ -616,3 +616,81 @@ def test_lifecycle_events_cover_assignment_artifact_retry_and_replacement(kernel
             "artifact.created", "artifact.submitted", "artifact.rejected",
             "retry.scheduled"}.issubset(kinds)
     assert artifact.id in core.get_run(rid).artifacts
+
+
+def test_escalate_unsupported_capability_blocks_task(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task()])
+    core.delegate(rid, "a", "author")
+    core.start(rid, "a")
+    failure = core.fail(rid, "a", FailureClass.UNSUPPORTED_CAPABILITY, "Requested capability is not offered")
+    decision = core.recover(rid, failure.id, "Escalate to Manager for capability decision")
+    run = core.get_run(rid)
+    assert decision.action == "ESCALATE"
+    assert run.tasks["a"].status == TaskStatus.BLOCKED
+    assert run.tasks["a"].blocker == "Unsupported capability requires Manager escalation"
+
+
+def test_escalate_tool_failure_blocks_task(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task()])
+    core.delegate(rid, "a", "author")
+    core.start(rid, "a")
+    failure = core.fail(rid, "a", FailureClass.TOOL_FAILURE, "Sandbox executor crashed")
+    decision = core.recover(rid, failure.id, "Escalate tooling repair to Manager")
+    run = core.get_run(rid)
+    assert decision.action == "ESCALATE"
+    assert run.tasks["a"].status == TaskStatus.BLOCKED
+    assert run.tasks["a"].blocker == "Tool failure requires Manager escalation"
+
+
+def test_replan_recovery_blocks_task_until_manager_replans(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task()])
+    core.delegate(rid, "a", "author")
+    core.start(rid, "a")
+    failure = core.fail(rid, "a", FailureClass.TASK_AMBIGUITY, "Objective admits two contradictory readings")
+    decision = core.recover(rid, failure.id, "Route ambiguity to explicit replan")
+    run = core.get_run(rid)
+    assert decision.action == "REPLAN"
+    assert run.tasks["a"].status == TaskStatus.BLOCKED
+    assert run.tasks["a"].blocker == "Manager replan required"
+    proposal = ReplanProposal(base_revision=0, trigger="Ambiguity resolved", evidence=["Operator clarified scope"], reopen=["a"])
+    core.propose_replan(rid, proposal)
+    core.apply_replan(rid, proposal.id)
+    run = core.get_run(rid)
+    assert run.tasks["a"].status == TaskStatus.READY
+    assert run.tasks["a"].blocker is None
+
+
+def test_recovery_retry_clears_blocker(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task()])
+    core.delegate(rid, "a", "author")
+    core.start(rid, "a")
+    failure = core.fail(rid, "a", FailureClass.PROVIDER_FAILURE, "Provider timeout")
+    assert core.get_run(rid).tasks["a"].blocker == "Provider timeout"
+    decision = core.recover(rid, failure.id, "Bounded retry after transient provider failure")
+    run = core.get_run(rid)
+    assert decision.action == "RETRY"
+    assert run.tasks["a"].status == TaskStatus.READY
+    assert run.tasks["a"].blocker is None
+
+
+def test_recovery_revise_and_replace_record_blockers(kernel):
+    core, rid = kernel
+    core.add_tasks(rid, [task(max_revisions=1)])
+    candidate(core, rid)
+    failure = core.fail(rid, "a", FailureClass.BAD_OUTPUT, "Wrong answer")
+    decision = core.recover(rid, failure.id, "Targeted revision")
+    run = core.get_run(rid)
+    assert decision.action == "REVISE"
+    assert run.tasks["a"].status == TaskStatus.REVISION_REQUIRED
+    assert run.tasks["a"].blocker == "Wrong answer"
+    candidate(core, rid)
+    failure = core.fail(rid, "a", FailureClass.BAD_OUTPUT, "Same issue")
+    decision = core.recover(rid, failure.id, "Revision limit reached; reassess worker fit")
+    run = core.get_run(rid)
+    assert decision.action == "REPLACE"
+    assert run.tasks["a"].status == TaskStatus.REPLACED
+    assert run.tasks["a"].blocker == "Worker replacement required"

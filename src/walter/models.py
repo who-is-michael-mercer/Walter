@@ -237,6 +237,24 @@ class ApprovalDecision(Model):
     created_at: str = Field(default_factory=now)
 
 
+class ModelUsageRecord(Model):
+    id: str = Field(default_factory=uid)
+    run_id: str
+    task_id: str | None = None
+    assignment_id: str | None = None
+    worker_id: str | None = None
+    provider: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    usage_known: bool = True
+    unknown_reason: str | None = None
+    raw_usage: dict[str, object] = Field(default_factory=dict)
+    created_at: str = Field(default_factory=now)
+
+
 class ReplanProposal(Model):
     id: str = Field(default_factory=uid)
     base_revision: int
@@ -286,6 +304,7 @@ class Run(Model):
     accepted_artifacts: list[str] = Field(default_factory=list)
     available_inputs: dict[str, str] = Field(default_factory=dict)
     decisions: list[Decision] = Field(default_factory=list)
+    usage_records: list[ModelUsageRecord] = Field(default_factory=list)
     acceptances: list[AcceptanceDecision] = Field(default_factory=list)
     failures: list[WorkerFailure] = Field(default_factory=list)
     recoveries: list[RecoveryDecision] = Field(default_factory=list)
@@ -298,3 +317,4 @@ class Run(Model):
     final_result: str | None = None
     created_at: str = Field(default_factory=now)
     updated_at: str = Field(default_factory=now)
+

@@ -1,10 +1,11 @@
 import asyncio
 import json
-from types import SimpleNamespace
 
 import pytest
 
 pytest.importorskip("agents")
+
+from agents.tool_context import ToolContext
 
 from walter import runtime
 
@@ -156,12 +157,17 @@ def test_delegate_returns_mocked_structured_tool_continuation(monkeypatch):
         return Result()
 
     monkeypatch.setattr(runtime.Runner, "run", fake_run)
-    # The decorator exposes the underlying coroutine through on_invoke_tool in the SDK.
+    # Exercise the SDK's decorated tool callback with its actual invocation context.
     invoke = getattr(runtime.delegate_task, "on_invoke_tool", None)
     if invoke is None:
         pytest.skip("installed SDK does not expose tool invocation hook")
-    context = SimpleNamespace(tool_name="delegate_task", run_config=None)
     tool_input = json.dumps({"packet": packet.model_dump()})
+    context = ToolContext(
+        context=None,
+        tool_name="delegate_task",
+        tool_call_id="test-call",
+        tool_arguments=tool_input,
+    )
     result = asyncio.run(invoke(context, tool_input))
     payload = json.loads(result) if isinstance(result, str) else result.model_dump()
     assert payload["task_id"] == "t1"

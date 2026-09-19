@@ -2,7 +2,7 @@ import json
 import sqlite3
 import pytest
 from walter.contracts import TaskPacket
-from walter.models import ApprovalStatus, Event, TaskNode, TaskStatus
+from walter.models import ApprovalStatus, Event, ModelUsageRecord, TaskNode, TaskStatus
 from walter.orchestration import GateError, Orchestrator
 from walter.store import ConcurrentUpdate, SQLiteStore
 
@@ -21,6 +21,57 @@ def test_durable_reload_and_events(tmp_path):
     assert other.events(run.id) == events
     assert [e.sequence for e in events] == list(range(1,before.event_cursor+1))
     other.close()
+
+
+def test_usage_records_persist_through_run_snapshot_round_trip(tmp_path):
+    path = tmp_path / "usage.db"
+    store = SQLiteStore(path)
+    core = Orchestrator(store)
+    run = core.create_run("objective", ["criterion"])
+    record = ModelUsageRecord(
+        run_id=run.id,
+        task_id="task-1",
+        assignment_id="assignment-1",
+        worker_id="worker-1",
+        provider="openrouter",
+        model="deepseek/deepseek-v4.1-flash",
+        role="worker",
+        input_tokens=1024,
+        output_tokens=512,
+        total_tokens=1536,
+        raw_usage={"prompt_tokens": 1024, "completion_tokens": 512, "total_tokens": 1536},
+    )
+    core.record_usage(run.id, record=record)
+    reloaded = core.get_run(run.id)
+    assert len(reloaded.usage_records) == 1
+    assert reloaded.usage_records[0] == record
+    saved = store.load(run.id)
+    assert saved.usage_records[0] == record
+    store.close()
+
+
+def test_usage_records_explicitly_mark_unknown_usage(tmp_path):
+    path = tmp_path / "unknown-usage.db"
+    store = SQLiteStore(path)
+    core = Orchestrator(store)
+    run = core.create_run("objective", ["criterion"])
+    core.record_usage(
+        run.id,
+        provider="openrouter",
+        model="deepseek/deepseek-v4.1-flash",
+        role="manager",
+        task_id="task-1",
+        raw_usage={},
+    )
+    reloaded = core.get_run(run.id)
+    assert len(reloaded.usage_records) == 1
+    usage = reloaded.usage_records[0]
+    assert usage.usage_known is False
+    assert usage.unknown_reason == "Provider did not return token usage data"
+    assert usage.input_tokens is None
+    assert usage.output_tokens is None
+    assert usage.total_tokens is None
+    store.close()
 
 
 def test_optimistic_lock_and_atomic_rollback(tmp_path):
@@ -252,3 +303,4 @@ def test_missing_v1_approval_is_explicitly_blocked_and_manager_can_regate(tmp_pa
     assert reloaded.load(rid).tasks["legacy"].status == TaskStatus.DELEGATED
     assert reloaded.connection.execute("PRAGMA user_version").fetchone()[0] == 2
     reloaded.close()
+

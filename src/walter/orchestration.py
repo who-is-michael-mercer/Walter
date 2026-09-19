@@ -9,7 +9,7 @@ import json
 from typing import Callable
 from .contracts import WorkerResult
 from .models import (AcceptanceDecision, ApprovalDecision, ApprovalGate, ApprovalRequest, ApprovalStatus, Artifact,
-    ArtifactValidation, CapabilityProfile, CapabilityRequest, CapabilityRequestStatus, Decision, Event, FailureClass, RecoveryDecision,
+    ArtifactValidation, CapabilityProfile, CapabilityRequest, CapabilityRequestStatus, Decision, Event, FailureClass, ModelUsageRecord, RecoveryDecision,
     ReplanProposal, Review, Run, TaskNode, TaskStatus, WorkerAssignment, WorkerFailure,
     WorkPlan, now)
 from .store import SQLiteStore
@@ -52,6 +52,96 @@ class Orchestrator:
         return self.store.load(run_id)
 
     inspect = get_run
+
+    @staticmethod
+    def _coerce_int(value):
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                return int(float(text))
+            except ValueError:
+                return None
+        return None
+
+    @classmethod
+    def _normalize_usage_record(cls, *, run_id: str, provider: str, model: str, role: str,
+            task_id: str | None = None, assignment_id: str | None = None,
+            worker_id: str | None = None, raw_usage: object | None = None) -> ModelUsageRecord:
+        mapping = {}
+        if isinstance(raw_usage, dict):
+            mapping = raw_usage
+        elif hasattr(raw_usage, "model_dump"):
+            mapping = raw_usage.model_dump()
+        elif hasattr(raw_usage, "dict"):
+            mapping = raw_usage.dict()
+        elif hasattr(raw_usage, "__dict__"):
+            mapping = {key: value for key, value in vars(raw_usage).items() if not key.startswith("_")}
+        input_tokens = cls._coerce_int(mapping.get("prompt_tokens"))
+        if input_tokens is None:
+            input_tokens = cls._coerce_int(mapping.get("input_tokens"))
+        output_tokens = cls._coerce_int(mapping.get("completion_tokens"))
+        if output_tokens is None:
+            output_tokens = cls._coerce_int(mapping.get("output_tokens"))
+        total_tokens = cls._coerce_int(mapping.get("total_tokens"))
+        if total_tokens is None:
+            total_tokens = cls._coerce_int(mapping.get("total"))
+        if input_tokens is not None and output_tokens is not None and total_tokens is None:
+            total_tokens = input_tokens + output_tokens
+        if input_tokens is None and output_tokens is None and total_tokens is None:
+            usage_known = False
+            reason = "Provider did not return token usage data"
+        else:
+            usage_known = True
+            reason = None
+        record = ModelUsageRecord(
+            run_id=run_id,
+            task_id=task_id,
+            assignment_id=assignment_id,
+            worker_id=worker_id,
+            provider=provider,
+            model=model,
+            role=role,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            usage_known=usage_known,
+            unknown_reason=reason,
+            raw_usage=mapping,
+        )
+        return record
+
+    def record_usage(self, run_id: str, *, record: ModelUsageRecord | None = None,
+            provider: str = "openrouter", model: str = "unknown", role: str = "manager",
+            task_id: str | None = None, assignment_id: str | None = None,
+            worker_id: str | None = None, raw_usage: object | None = None) -> ModelUsageRecord:
+        if record is None:
+            record = self._normalize_usage_record(
+                run_id=run_id,
+                provider=provider,
+                model=model,
+                role=role,
+                task_id=task_id,
+                assignment_id=assignment_id,
+                worker_id=worker_id,
+                raw_usage=raw_usage,
+            )
+        else:
+            record = record.model_copy(update={"run_id": run_id})
+
+        def operation(run, events):
+            run.usage_records.append(record.model_copy(deep=True))
+            self._event(run, events, "model.usage.recorded", usage=record.model_dump(mode="json"))
+            return record.model_copy(deep=True)
+
+        return self._mutate(run_id, operation)
 
     def _mutate(self, run_id: str, operation: Callable):
         run = self.get_run(run_id)
@@ -120,7 +210,6 @@ class Orchestrator:
             return False
         if task.capability == CapabilityProfile.DEVELOPER_SANDBOX and not task.workspace_id:
             return False
-        # A bare approval ID is ambiguous and cannot authorize task execution.
         if task.approval_ids:
             return False
         for gate in task.approval_gates:
@@ -273,7 +362,7 @@ class Orchestrator:
             if task.capability == CapabilityProfile.DEVELOPER_SANDBOX and not workspace_fingerprint:
                 raise GateError("Developer candidate requires observed workspace fingerprint")
             inputs = [a for dep in task.packet.dependencies for a in (run.tasks[dep].artifact_ids[-1:] if dep in run.tasks else [dep])]
-            artifact = Artifact(run_id=run_id, task_id=task_id, worker_id=worker_id, content=result.deliverable, content_digest=hashlib.sha256(result.deliverable.encode()).hexdigest(), workspace_fingerprint=workspace_fingerprint, version=len(task.artifact_ids)+1, predecessor_id=task.artifact_ids[-1] if task.artifact_ids else None, input_artifact_ids=inputs)
+            artifact = Artifact(run_id=run_id, task_id=task_id, worker_id=worker_id, content=result.deliverable, content_digest=hashlib.sha256(result.deliverable.encode()).hexdigest(), workspace_fingerprint=workspace_fingerprint, version=len(task.artifact_ids) + 1, predecessor_id=task.artifact_ids[-1] if task.artifact_ids else None, input_artifact_ids=inputs)
             task.result = result.model_copy(deep=True)
             task.artifact_ids.append(artifact.id)
             run.artifacts[artifact.id] = artifact
@@ -792,7 +881,6 @@ class Orchestrator:
             affected = set(proposal.reopen + proposal.remove + list(proposal.dependencies))
             if not affected.issubset(run.tasks):
                 raise GateError("Unknown task in replan")
-            # Invalidate transitive consumers, including explicit artifact dependencies.
             changed = True
             while changed:
                 changed = False
@@ -844,3 +932,4 @@ class Orchestrator:
             self._event(run, events, "run.completed", criterion_evidence=criterion_evidence)
         self._mutate(run_id, operation)
         return self.get_run(run_id)
+

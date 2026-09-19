@@ -87,6 +87,14 @@ class WorkerAssignment(Model):
     created_at: str = Field(default_factory=now)
 
 
+class ReviewAssignment(Model):
+    id: str = Field(default_factory=uid)
+    task_id: str
+    artifact_id: str
+    reviewer_id: str
+    created_at: str = Field(default_factory=now)
+
+
 class TaskNode(Model):
     packet: TaskPacket
     capability: CapabilityProfile = CapabilityProfile.MODEL_ONLY
@@ -99,6 +107,8 @@ class TaskNode(Model):
     revisions: int = 0
     max_attempts: int = Field(default=3, ge=1)
     max_revisions: int = Field(default=2, ge=0)
+    review_attempts: int = Field(default=0, ge=0)
+    max_review_attempts: int = Field(default=3, ge=1)
     assignment: WorkerAssignment | None = None
     assignment_history: list[WorkerAssignment] = Field(default_factory=list)
     artifact_ids: list[str] = Field(default_factory=list)
@@ -280,6 +290,9 @@ class Run(Model):
     objective: str
     constraints: list[str] = Field(default_factory=list)
     status: str = "active"
+    max_concurrent_specialists: int = Field(default=4, ge=1)
+    specialist_timeout_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
+    reviews_in_flight: dict[str, ReviewAssignment] = Field(default_factory=dict)
     plan: WorkPlan
     tasks: dict[str, TaskNode] = Field(default_factory=dict)
     artifacts: dict[str, Artifact] = Field(default_factory=dict)

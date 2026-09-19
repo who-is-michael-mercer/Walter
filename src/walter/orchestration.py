@@ -10,7 +10,7 @@ from typing import Callable
 from .contracts import WorkerResult
 from .models import (AcceptanceDecision, ApprovalDecision, ApprovalGate, ApprovalRequest, ApprovalStatus, Artifact,
     ArtifactValidation, CapabilityProfile, CapabilityRequest, CapabilityRequestStatus, Decision, Event, FailureClass, RecoveryDecision,
-    ReplanProposal, Review, Run, TaskNode, TaskStatus, WorkerAssignment, WorkerFailure,
+    ReplanProposal, Review, ReviewAssignment, Run, TaskNode, TaskStatus, WorkerAssignment, WorkerFailure,
     WorkPlan, now)
 from .store import SQLiteStore
 
@@ -81,10 +81,14 @@ class Orchestrator:
                 not EXECUTABLE_DEVELOPER_CHECKS.intersection(task.required_checks)):
             raise GateError("Developer sandbox requires compile, unittest, or pytest validation")
 
-    def create_run(self, objective: str, completion_criteria: list[str], *, constraints: list[str] | None = None, max_replans: int = 3) -> Run:
+    def create_run(self, objective: str, completion_criteria: list[str], *, constraints: list[str] | None = None, max_replans: int = 3,
+            max_concurrent_specialists: int = 4, specialist_timeout_seconds: float = 300) -> Run:
         if not objective.strip() or not all(x.strip() for x in completion_criteria):
             raise GateError("Objective and criteria must be substantive")
-        run = Run(objective=objective, constraints=constraints or [], plan=WorkPlan(objective=objective, completion_criteria=completion_criteria, max_replans=max_replans))
+        run = Run(objective=objective, constraints=constraints or [],
+            max_concurrent_specialists=max_concurrent_specialists,
+            specialist_timeout_seconds=specialist_timeout_seconds,
+            plan=WorkPlan(objective=objective, completion_criteria=completion_criteria, max_replans=max_replans))
         return self.store.save(run, [Event(run_id=run.id, kind="run.created")], None)
 
     @staticmethod
@@ -96,12 +100,19 @@ class Orchestrator:
             if key in visited:
                 return
             visiting.add(key)
-            for dep in run.tasks[key].packet.dependencies:
+            packet = run.tasks[key].packet
+            for dep in [*packet.dependencies, *packet.required_inputs]:
                 if dep in run.tasks:
                     if run.tasks[dep].status in {TaskStatus.CANCELLED, TaskStatus.REPLACED}:
                         raise GateError("Dependency references retired task")
                     visit(dep)
-                elif dep not in run.artifacts:
+                elif dep in run.artifacts:
+                    producer = run.artifacts[dep].task_id
+                    if producer not in run.tasks:
+                        raise GateError("Artifact references unknown producer")
+                    if run.tasks[producer].status not in {TaskStatus.CANCELLED, TaskStatus.REPLACED}:
+                        visit(producer)
+                elif dep in packet.dependencies:
                     raise GateError(f"Unknown dependency {dep}")
             visiting.remove(key)
             visited.add(key)
@@ -109,14 +120,57 @@ class Orchestrator:
             if task.status not in {TaskStatus.CANCELLED, TaskStatus.REPLACED}:
                 visit(key)
 
+    def _input_artifact_ids(self, run, task, visiting=None, checked=None):
+        """Resolve declared inputs and verify their complete canonical lineage."""
+        visiting = set() if visiting is None else visiting
+        checked = set() if checked is None else checked
+        inputs = []
+        for value in [*task.packet.dependencies, *task.packet.required_inputs]:
+            if value in run.tasks:
+                upstream = run.tasks[value]
+                if upstream.status != TaskStatus.ACCEPTED or not upstream.artifact_ids:
+                    raise GateError("Input task is not accepted")
+                artifact_id = upstream.artifact_ids[-1]
+            elif value in run.artifacts:
+                artifact_id = value
+            elif value in run.available_inputs and value not in task.packet.dependencies:
+                continue
+            else:
+                raise GateError("Required input is unavailable")
+            self._validate_accepted_artifact(run, artifact_id, visiting, checked)
+            if artifact_id not in inputs:
+                inputs.append(artifact_id)
+        return inputs
+
+    def _validate_accepted_artifact(self, run, artifact_id, visiting=None, checked=None):
+        visiting = set() if visiting is None else visiting
+        checked = set() if checked is None else checked
+        if artifact_id in visiting:
+            raise GateError("Artifact input cycle")
+        if artifact_id in checked:
+            return
+        artifact = run.artifacts.get(artifact_id)
+        task = run.tasks.get(artifact.task_id) if artifact else None
+        if (not artifact or not task or artifact.run_id != run.id or
+                artifact.status != "accepted" or artifact_id not in run.accepted_artifacts or
+                task.status != TaskStatus.ACCEPTED or task.artifact_ids[-1:] != [artifact_id]):
+            raise GateError("Input artifact is no longer canonical and accepted")
+        visiting.add(artifact_id)
+        inputs = self._input_artifact_ids(run, task, visiting, checked)
+        if set(artifact.input_artifact_ids) != set(inputs):
+            raise GateError("Artifact input provenance does not match declared inputs")
+        visiting.remove(artifact_id)
+        checked.add(artifact_id)
+
+    def _validate_task_inputs(self, run, task):
+        inputs = self._input_artifact_ids(run, task)
+        if not task.artifact_ids or set(run.artifacts[task.artifact_ids[-1]].input_artifact_ids) != set(inputs):
+            raise GateError("Candidate input provenance does not match declared inputs")
+
     def _ready(self, run, task):
-        for dep in task.packet.dependencies:
-            if dep in run.tasks:
-                if run.tasks[dep].status != TaskStatus.ACCEPTED:
-                    return False
-            elif dep not in run.accepted_artifacts:
-                return False
-        if any(value not in run.available_inputs and value not in run.accepted_artifacts for value in task.packet.required_inputs):
+        try:
+            self._input_artifact_ids(run, task)
+        except GateError:
             return False
         if task.capability == CapabilityProfile.DEVELOPER_SANDBOX and not task.workspace_id:
             return False
@@ -152,6 +206,10 @@ class Orchestrator:
     def resume(self, run_id: str) -> Run:
         """Explicit interruption recovery, without automatically rerunning a worker."""
         def operation(run, events):
+            for assignment in run.reviews_in_flight.values():
+                self._event(run, events, "review.failed", assignment=assignment.model_dump(mode="json"),
+                    classification=FailureClass.TIMEOUT.value, evidence="Review interrupted before durable submission")
+            run.reviews_in_flight.clear()
             for task in run.tasks.values():
                 if task.status in {TaskStatus.DELEGATED, TaskStatus.RUNNING}:
                     failure = WorkerFailure(task_id=task.id, classification=FailureClass.TIMEOUT, evidence="Assignment interrupted before durable submission")
@@ -172,7 +230,7 @@ class Orchestrator:
                 raise GateError("Use explicit replan after execution begins")
             for source in tasks:
                 task = source.model_copy(deep=True)
-                if task.id in run.tasks or task.status != TaskStatus.PLANNED or task.attempts or task.artifact_ids or task.assignment:
+                if task.id in run.tasks or task.id in run.available_inputs or task.id in run.artifacts or task.status != TaskStatus.PLANNED or task.attempts or task.artifact_ids or task.assignment:
                     raise GateError("Only fresh unique tasks can be added")
                 self._validate_capability_checks(task)
                 run.tasks[task.id] = task
@@ -236,6 +294,7 @@ class Orchestrator:
 
     def delegate(self, run_id: str, task_id: str, worker_id: str) -> WorkerAssignment:
         def operation(run, events):
+            self._admit_specialist(run)
             task = run.tasks[task_id]
             if not worker_id.strip() or worker_id == self.manager_id or not self._ready(run, task) or task.attempts >= task.max_attempts:
                 raise GateError("Worker, readiness or attempt gate failed")
@@ -249,6 +308,39 @@ class Orchestrator:
             self._event(run, events, "assignment.created", assignment=assignment.model_dump(mode="json"), attempt=task.attempts)
             return assignment
         return self._mutate(run_id, operation)
+
+    @staticmethod
+    def _admit_specialist(run):
+        active = sum(task.status in {TaskStatus.DELEGATED, TaskStatus.RUNNING}
+                     for task in run.tasks.values()) + len(run.reviews_in_flight)
+        if active >= run.max_concurrent_specialists:
+            raise GateError("Specialist concurrency limit reached")
+
+    def start_review(self, run_id: str, artifact_id: str, reviewer_id: str, *, workspace_fingerprint=None):
+        def operation(run, events):
+            self._admit_specialist(run)
+            artifact, task = self._candidate(run, events, artifact_id, workspace_fingerprint)
+            if task.id in run.reviews_in_flight or task.review_attempts >= task.max_review_attempts:
+                raise GateError("Review already active or review attempt limit reached")
+            if not reviewer_id.strip() or reviewer_id == self.manager_id or reviewer_id in {a.worker_id for a in task.assignment_history}:
+                raise GateError("Reviewer must be independent of all candidate authors")
+            assignment = ReviewAssignment(task_id=task.id, artifact_id=artifact.id, reviewer_id=reviewer_id)
+            run.reviews_in_flight[task.id] = assignment
+            task.review_attempts += 1
+            self._event(run, events, "review.started", assignment=assignment.model_dump(mode="json"), attempt=task.review_attempts)
+            return assignment
+        return self._mutate(run_id, operation)
+
+    def fail_review(self, run_id: str, task_id: str, assignment_id: str, classification: FailureClass, evidence: str):
+        """Preserve the candidate and audit interrupted QA without fabricating a verdict."""
+        def operation(run, events):
+            assignment = run.reviews_in_flight.get(task_id)
+            if not assignment or assignment.id != assignment_id:
+                raise GateError("Review failure does not match current assignment")
+            del run.reviews_in_flight[task_id]
+            self._event(run, events, "review.failed", assignment=assignment.model_dump(mode="json"),
+                classification=classification.value, evidence=evidence)
+        self._mutate(run_id, operation)
 
     def start(self, run_id: str, task_id: str):
         def operation(run, events):
@@ -269,10 +361,10 @@ class Orchestrator:
                 raise GateError("Submission does not match the current worker assignment")
             if result.task_id != task_id or result.status != "completed" or not result.deliverable.strip():
                 raise GateError("Expected matching completed candidate; route blockers through fail")
+            inputs = self._input_artifact_ids(run, task)
             self._transition(run, events, task, TaskStatus.SUBMITTED, "Candidate received")
             if task.capability == CapabilityProfile.DEVELOPER_SANDBOX and not workspace_fingerprint:
                 raise GateError("Developer candidate requires observed workspace fingerprint")
-            inputs = [a for dep in task.packet.dependencies for a in (run.tasks[dep].artifact_ids[-1:] if dep in run.tasks else [dep])]
             artifact = Artifact(run_id=run_id, task_id=task_id, worker_id=worker_id, content=result.deliverable, content_digest=hashlib.sha256(result.deliverable.encode()).hexdigest(), workspace_fingerprint=workspace_fingerprint, version=len(task.artifact_ids)+1, predecessor_id=task.artifact_ids[-1] if task.artifact_ids else None, input_artifact_ids=inputs)
             task.result = result.model_copy(deep=True)
             task.artifact_ids.append(artifact.id)
@@ -346,7 +438,8 @@ class Orchestrator:
     def validate(self, run_id: str, artifact_id: str, check: str, passed: bool, evidence: str, validator_id: str, *, workspace_fingerprint: str | None = None):
         def operation(run, events):
             artifact, task = self._candidate(run, events, artifact_id, workspace_fingerprint)
-            if validator_id == self.manager_id or validator_id in {a.worker_id for a in task.assignment_history}:
+            if (not validator_id.strip() or validator_id == self.manager_id
+                    or validator_id in {a.worker_id for a in task.assignment_history}):
                 raise GateError("Author cannot validate own candidate")
             record = ArtifactValidation(artifact_id=artifact_id, content_digest=artifact.content_digest, check=check, passed=passed, evidence=evidence, validator_id=validator_id)
             self._event(run, events, "artifact.validation_started", artifact_id=artifact_id,
@@ -356,11 +449,32 @@ class Orchestrator:
             return record
         return self._mutate(run_id, operation)
 
-    def review(self, run_id: str, artifact_id: str, reviewer_id: str, passed: bool, evidence: str, *, workspace_fingerprint: str | None = None):
+    def review(self, run_id: str, artifact_id: str, reviewer_id: str, passed: bool, evidence: str, *, workspace_fingerprint: str | None = None, assignment_id: str | None = None):
         def operation(run, events):
             artifact, task = self._candidate(run, events, artifact_id, workspace_fingerprint)
-            if reviewer_id == self.manager_id or reviewer_id in {a.worker_id for a in task.assignment_history}:
+            active = run.reviews_in_flight.get(task.id)
+            submitted_assignment_id = assignment_id
+            if (not reviewer_id.strip() or reviewer_id == self.manager_id
+                    or reviewer_id in {a.worker_id for a in task.assignment_history}):
                 raise GateError("Reviewer must be independent of all candidate authors")
+            if submitted_assignment_id is None and active is None:
+                # Trusted synchronous/test-fixture route. It still commissions a
+                # real bounded assignment and consumes it in this transaction.
+                self._admit_specialist(run)
+                if task.review_attempts >= task.max_review_attempts:
+                    raise GateError("Review attempt limit reached")
+                active = ReviewAssignment(
+                    task_id=task.id, artifact_id=artifact.id, reviewer_id=reviewer_id
+                )
+                run.reviews_in_flight[task.id] = active
+                task.review_attempts += 1
+                self._event(run, events, "review.started",
+                    assignment=active.model_dump(mode="json"), attempt=task.review_attempts)
+                submitted_assignment_id = active.id
+            else:
+                if not active or (active.id, active.artifact_id, active.reviewer_id) != (submitted_assignment_id, artifact_id, reviewer_id):
+                    raise GateError("Review does not match current assignment")
+            del run.reviews_in_flight[task.id]
             record = Review(artifact_id=artifact_id, content_digest=artifact.content_digest, reviewer_id=reviewer_id, passed=passed, evidence=evidence)
             artifact.reviews.append(record)
             self._event(run, events, "artifact.reviewed", review=record.model_dump())
@@ -375,6 +489,8 @@ class Orchestrator:
             task = run.tasks[task_id]
             if not task.artifact_ids:
                 raise GateError("No candidate")
+            if task_id in run.reviews_in_flight:
+                raise GateError("Independent review is still running")
             artifact, task = self._candidate(run, events, task.artifact_ids[-1], workspace_fingerprint)
             evidence_principals = ({a.worker_id for a in task.assignment_history} |
                 {v.validator_id for v in artifact.validations} | {r.reviewer_id for r in artifact.reviews})
@@ -391,6 +507,7 @@ class Orchestrator:
                 raise GateError("At least one external validation or review is required")
             if not self._ready(run, task):
                 raise GateError("Inputs are no longer accepted")
+            self._validate_task_inputs(run, task)
             decision = AcceptanceDecision(action="ACCEPT", reason=reason, actor_id=self.manager_id,
                 context=f"Acceptance of artifact {artifact.id} for task {task_id}",
                 options_considered=["ACCEPT", "REVISE", "REJECT", "REPLACE"],
@@ -460,17 +577,27 @@ class Orchestrator:
                 if not self._ready(run, task):
                     raise GateError("Retry gates unresolved")
                 self._transition(run, events, task, TaskStatus.READY, reason)
+                task.blocker = None
                 self._event(run, events, "retry.scheduled", task_id=task.id, failure_id=failure.id, next_attempt=task.attempts + 1)
             elif action == "REVISE":
                 task.revisions += 1
                 self._transition(run, events, task, TaskStatus.REVISION_REQUIRED, reason)
+                task.blocker = failure.evidence
             elif action == "REPLACE":
                 self._transition(run, events, task, TaskStatus.REPLACED, reason)
+                task.blocker = "Worker replacement required"
                 self._event(run, events, "worker.replaced", task_id=task.id, failure_id=failure.id,
                     worker_id=task.assignment.worker_id if task.assignment else None)
-            elif action == "ESCALATE" and kind == FailureClass.CAPABILITY_UNAVAILABLE:
+            elif action == "ESCALATE":
                 self._transition(run, events, task, TaskStatus.BLOCKED, reason)
-                task.blocker = "Capability escalation pending"
+                task.blocker = {
+                    FailureClass.CAPABILITY_UNAVAILABLE: "Capability escalation pending",
+                    FailureClass.UNSUPPORTED_CAPABILITY: "Unsupported capability requires Manager escalation",
+                    FailureClass.TOOL_FAILURE: "Tool failure requires Manager escalation",
+                }[kind]
+            elif action == "REPLAN":
+                self._transition(run, events, task, TaskStatus.BLOCKED, reason)
+                task.blocker = "Manager replan required"
             if task.artifact_ids:
                 rejected = run.artifacts[task.artifact_ids[-1]]
                 rejected.status = "rejected"
@@ -792,13 +919,17 @@ class Orchestrator:
             affected = set(proposal.reopen + proposal.remove + list(proposal.dependencies))
             if not affected.issubset(run.tasks):
                 raise GateError("Unknown task in replan")
-            # Invalidate transitive consumers, including explicit artifact dependencies.
+            # Declared inputs and recorded lineage both identify transitive consumers.
             changed = True
             while changed:
                 changed = False
                 artifact_ids = {a for key in affected for a in run.tasks[key].artifact_ids}
                 for key, task in run.tasks.items():
-                    if key not in affected and set(task.packet.dependencies) & (affected | artifact_ids):
+                    references = set(task.packet.dependencies + task.packet.required_inputs)
+                    if task.artifact_ids:
+                        references.update(run.artifacts[task.artifact_ids[-1]].input_artifact_ids)
+                    if (key not in affected and task.status not in {TaskStatus.CANCELLED, TaskStatus.REPLACED}
+                            and references & (affected | artifact_ids)):
                         affected.add(key)
                         changed = True
             for key in affected:
@@ -810,6 +941,10 @@ class Orchestrator:
                     if artifact_id in run.accepted_artifacts:
                         run.accepted_artifacts.remove(artifact_id)
                 task.status = TaskStatus.CANCELLED if key in proposal.remove else TaskStatus.PLANNED
+                review = run.reviews_in_flight.pop(key, None)
+                if review:
+                    self._event(run, events, "review.cancelled", assignment=review.model_dump(mode="json"),
+                        reason=proposal.trigger, proposal_id=proposal.id)
                 task.assignment = None
                 task.result = None
                 task.blocker = None
@@ -817,7 +952,7 @@ class Orchestrator:
             for key, deps in proposal.dependencies.items():
                 run.tasks[key].packet.dependencies = list(deps)
             for source in proposal.add:
-                if source.id in run.tasks or source.status != TaskStatus.PLANNED or source.attempts or source.assignment or source.artifact_ids:
+                if source.id in run.tasks or source.id in run.available_inputs or source.id in run.artifacts or source.status != TaskStatus.PLANNED or source.attempts or source.assignment or source.artifact_ids:
                     raise GateError("Replan additions must be fresh unique tasks")
                 self._validate_capability_checks(source)
                 run.tasks[source.id] = source.model_copy(deep=True)
@@ -834,10 +969,19 @@ class Orchestrator:
             active = [t for t in run.tasks.values() if t.status != TaskStatus.CANCELLED]
             if not active or any(t.status != TaskStatus.ACCEPTED for t in active) or run.unresolved_issues:
                 raise GateError("Required work remains unresolved")
+            self._graph(run)
+            checked = set()
+            for task in active:
+                if not task.artifact_ids or not self._ready(run, task):
+                    raise GateError("Accepted task inputs are no longer valid")
+                self._validate_accepted_artifact(run, task.artifact_ids[-1], checked=checked)
             if any(request.required and request.status == ApprovalStatus.PENDING for request in run.approvals.values()):
                 raise GateError("Outstanding required approval gate")
             if set(criterion_evidence) != set(run.plan.completion_criteria) or any(not ids or not set(ids).issubset(run.accepted_artifacts) for ids in criterion_evidence.values()):
                 raise GateError("Every completion criterion requires accepted artifact evidence")
+            for ids in criterion_evidence.values():
+                for artifact_id in ids:
+                    self._validate_accepted_artifact(run, artifact_id, checked=checked)
             if not final_result.strip():
                 raise GateError("Final result required")
             run.final_result, run.status, run.plan.status = final_result, "completed", "completed"

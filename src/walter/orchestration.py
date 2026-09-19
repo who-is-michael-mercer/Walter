@@ -362,7 +362,7 @@ class Orchestrator:
             if task.capability == CapabilityProfile.DEVELOPER_SANDBOX and not workspace_fingerprint:
                 raise GateError("Developer candidate requires observed workspace fingerprint")
             inputs = [a for dep in task.packet.dependencies for a in (run.tasks[dep].artifact_ids[-1:] if dep in run.tasks else [dep])]
-            artifact = Artifact(run_id=run_id, task_id=task_id, worker_id=worker_id, content=result.deliverable, content_digest=hashlib.sha256(result.deliverable.encode()).hexdigest(), workspace_fingerprint=workspace_fingerprint, version=len(task.artifact_ids) + 1, input_artifact_ids=inputs)
+            artifact = Artifact(run_id=run_id, task_id=task_id, worker_id=worker_id, content=result.deliverable, content_digest=hashlib.sha256(result.deliverable.encode()).hexdigest(), workspace_fingerprint=workspace_fingerprint, version=len(task.artifact_ids) + 1, predecessor_id=task.artifact_ids[-1] if task.artifact_ids else None, input_artifact_ids=inputs)
             task.result = result.model_copy(deep=True)
             task.artifact_ids.append(artifact.id)
             run.artifacts[artifact.id] = artifact

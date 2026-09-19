@@ -16,6 +16,7 @@ from walter.sandbox import WorkspaceManager
 from walter.store import SQLiteStore
 from walter.adapter import workspace_tools
 from walter.adapter import load_system_prompt
+from walter.adapter import DURABLE_INSTRUCTIONS
 
 
 def packet(task_id="task"):
@@ -449,6 +450,15 @@ def test_repo_reader_escalation_reuses_exact_workspace_with_read_only_tools(tmp_
     asyncio.run(controller.delegate("task"))
     assert observed["tools"] == {"read_file", "list_files", "inspect_diff", "workspace_status"}
     assert controller.inspect().tasks["task"].workspace_id == scope["workspace_id"]
+
+
+def test_controller_instructions_combine_prompt_appendix_and_run_id():
+    controller = controller_for(TaskNode(packet=packet(), required_checks=["result_schema"]))
+    instructions = controller.instructions()
+    assert ("You are **Walter**, a general-purpose orchestration Manager."
+            in instructions)
+    assert DURABLE_INSTRUCTIONS in instructions
+    assert instructions.endswith("Run ID: " + controller.run_id)
 
 
 def test_load_system_prompt_returns_repo_prompt_stripped_and_non_empty():

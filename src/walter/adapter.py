@@ -34,12 +34,11 @@ class ReviewResult(BaseModel):
 
 
 DURABLE_INSTRUCTIONS = """
-You are Walter, the Manager. All work is governed by the durable run below.
+All work is governed by the durable run below.
 Use inspect_run to learn operational truth. First define measurable completion criteria with
 set_completion_criteria. Then define narrow task packets and predeclare checks with plan_tasks,
-and delegate only eligible tasks. You may not produce specialist
-work yourself. Worker submission is provisional. Run validate_task for actual programmatic
-checks and review_task for a fresh independent reviewer, then explicitly accept_task.
+and delegate only eligible tasks. Worker submission is provisional. Run validate_task for actual
+programmatic checks and review_task for a fresh independent reviewer, then explicitly accept_task.
 Use recover_task or replan_tasks when evidence requires changes. Never manufacture test or
 review evidence. For candidate actions use request_candidate_approval and
 authorize_candidate_action, which recompute scope from trusted current state. No tool can grant

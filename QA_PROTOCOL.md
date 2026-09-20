@@ -27,3 +27,7 @@ The Manager checks deliverable existence, scope, criteria, contradictions, prove
 ## Rejection
 
 Failed validation or review prevents acceptance. Correction routes through `REVISION_REQUIRED`, replacement, or explicit replan. Default maximum revisions with the same route are two; attempts and replans are separately bounded. Conflicting material judgments require targeted follow-up or adjudication, not averaging.
+
+Adjudication is a design reference only: it is not an implemented mechanism in the
+current runtime. Conflicting judgments currently route through targeted follow-up,
+revision, replacement, or explicit replan.

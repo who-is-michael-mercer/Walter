@@ -1,5 +1,7 @@
 # Candidate Result Packet
 
+> Status: not implemented in the current runtime; retained as design reference.
+
 **Task ID:** TASK-___
 **Worker/assignment ID:** ___
 **Worker-result status:** `completed` / `blocked` / `needs_revision`

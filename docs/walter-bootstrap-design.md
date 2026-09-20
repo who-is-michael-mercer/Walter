@@ -1,5 +1,8 @@
 # Walter Bootstrap Design
 
+> Historical reference: superseded by `docs/walter-bootstrap-master-blueprint.md`
+> (DEC-001) and not authoritative for current behavior.
+
 ## Purpose
 
 This document captures the conceptual architecture for Walter’s evolution from a delegated-task agent into a manager-led organization of temporary specialist workers. It defines the design intent, safety principles, architectural boundaries, deployment strategy, and the long-term path to safe self-improvement.

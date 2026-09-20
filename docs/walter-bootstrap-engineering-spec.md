@@ -1,5 +1,8 @@
 # Walter Bootstrap Engineering Spec
 
+> Historical reference: superseded by `docs/walter-bootstrap-master-blueprint.md`
+> (DEC-001) and not authoritative for current behavior.
+
 ## Objective
 
 This document defines the engineering work required to transform Walter from a delegated-task agent into a Manager-owned orchestration runtime with explicit task dependencies, guardrails, artifact review, bounded retries, replan logic, safe concurrency, and approval gates.

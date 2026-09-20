@@ -40,6 +40,19 @@ OpenRouter is the only configured provider. `researcher` maps to the Agents SDK 
 
 Provider trace export and sensitive trace payloads remain disabled. The accepted `--trace-sensitive` option is a reserved compatibility no-op; CLI output labels workflow identifiers as `Local trace ID (provider export disabled)`.
 
+### Usage budget
+
+A run's model usage can be bounded with optional environment variables:
+
+```text
+WALTER_MAX_MODEL_CALLS=100
+WALTER_MAX_INPUT_TOKENS=1000000
+WALTER_MAX_OUTPUT_TOKENS=500000
+WALTER_MAX_TOTAL_TOKENS=1500000
+```
+
+Each is optional; leave it unset for unlimited. Budgets are per-run and cumulative across the run's model calls. A malformed value (non-integer or negative) fails configuration. When a budget is exhausted the CLI reports the exhaustion cleanly rather than continuing.
+
 ## Use
 
 Interactive and one-shot goals use the durable control plane:
@@ -89,7 +102,7 @@ The readiness demo is a harmless offline fixture. It exercises the real isolatio
 - `OPERATING_MODEL.md`, `TASK_PROTOCOL.md`, `STATE_MODEL.md` — executable orchestration semantics.
 - `PERMISSIONS.md`, `TOOLS.md`, `QA_PROTOCOL.md`, `FAILURE_RECOVERY.md` — authority, capability, evidence, and recovery rules.
 - `docs/walter-bootstrap-master-blueprint.md` — primary bootstrap specification.
-- `docs/IMPLEMENTATION_STATE.md` — current implementation graph and verified evidence.
-- `templates/`, `runbooks/`, `evals/`, `prompts/` — operational support material.
+- `docs/IMPLEMENTATION_STATE.md` — current implementation state and verified evidence.
+- `prompts/`, `protocols/`, `templates/`, `runbooks/`, `evals/`, `.codex/` — human reference material; not loaded by the runtime.
 
 Target-project artifacts belong in their target repositories. Candidate development uses Manager-created worktrees. Ordinary grants cannot mutate Walter's live checkout, safety/authority paths, secrets, or control-plane modules; an exact one-use human-approved safety grant is a separate authority path.

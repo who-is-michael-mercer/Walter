@@ -8,6 +8,10 @@
 - Enforceable capability profiles, isolated candidate worktrees, fail-closed Bubblewrap checks, trusted validation, independent review, and an offline self-build-readiness fixture that stops at human promotion approval.
 - Schema-v2 approval lifecycle/gates with transactional v1 backups and explicit legacy-gate recovery; assignment-bound submissions; audited revision workspaces; trusted current-candidate approval scope; and one-use, exactly scoped safety-boundary grants.
 - Assignment-bound typed capability requests with partial-result preservation, exact Manager-created repository workspaces, atomic/idempotent restart-safe application, cleanup on rejection, profile-correct redelegation, and mandatory executable checks for developer plans/replans/changes.
+- Stale workspace-grant reconciliation that closes grants whose signed manifest no longer matches the host environment.
+- Forward-compatible durable snapshot loading that prunes unknown fields and emits clear diagnostics instead of failing.
+- Env-configurable per-run usage budget (`WALTER_MAX_MODEL_CALLS`, `WALTER_MAX_INPUT_TOKENS`, `WALTER_MAX_OUTPUT_TOKENS`, `WALTER_MAX_TOTAL_TOKENS`) with clean exhaustion reporting.
+- Live end-to-end verification on 2026-09-20: a model-driven run planned, delegated, validated, independently reviewed, accepted, and completed within its token budget.
 
 ### Changed
 
@@ -15,6 +19,8 @@
 - Separated Agents SDK conversation sessions from authoritative operational state and documented the current OpenRouter hosted-web limitation.
 - Guarded new CLI runs with a completion-criteria sentinel, provider preflight, deterministic resource closure, and OS-derived local operator audit identity.
 - Kept the legacy trace-sensitive option as an honest no-op: provider trace export and sensitive payloads remain disabled, and displayed workflow identifiers are explicitly local.
+- Made the durable store safe across Agents SDK tool-dispatch threads.
+- Fixed CLI session cleanup and Manager output surfacing.
 
 ### Safety boundary
 

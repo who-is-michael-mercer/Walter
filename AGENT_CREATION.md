@@ -50,8 +50,8 @@ Roles are dynamically generated, but common archetypes include:
 - writer;
 - tester;
 - reviewer;
-- adjudicator;
-- domain-scoping expert.
+- adjudicator (not implemented in the current runtime);
+- domain-scoping expert (not implemented in the current runtime).
 
 Archetypes are starting points, not a permanent roster.
 

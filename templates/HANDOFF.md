@@ -1,5 +1,7 @@
 # Handoff
 
+> Status: not implemented in the current runtime; retained as design reference.
+
 ## Parent goal
 
 ## Assigned lane

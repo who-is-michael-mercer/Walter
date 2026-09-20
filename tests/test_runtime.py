@@ -82,6 +82,8 @@ def test_provider_client_is_reused(monkeypatch):
 
 
 def test_manager_uses_durable_controller_when_supplied(monkeypatch):
+    from walter.usage_model import UsageRecordingModel
+
     class Controller:
         core = object()
         run_id = "run-test"
@@ -92,6 +94,9 @@ def test_manager_uses_durable_controller_when_supplied(monkeypatch):
         def tools(self):
             return ["durable tool"]
 
+    controller = Controller()
+    manager_model, worker_model = object(), object()
+
     monkeypatch.setattr(
         runtime.RuntimeConfig,
         "from_env",
@@ -99,8 +104,20 @@ def test_manager_uses_durable_controller_when_supplied(monkeypatch):
             "openrouter", "key", "https://openrouter.ai/api/v1", "manager", "worker"
         )),
     )
-    monkeypatch.setattr(runtime, "build_models", lambda value: (object(), object()))
+    monkeypatch.setattr(runtime, "build_models", lambda value: (manager_model, worker_model))
     monkeypatch.setattr(runtime, "_agent", lambda **kwargs: kwargs)
-    manager = runtime.build_walter(Controller())
+
+    manager = runtime.build_walter(controller)
+
+    # The manager agent is driven by the controller's doctrine and tools.
     assert manager["instructions"] == "durable instructions"
     assert manager["tools"] == ["durable tool"]
+
+    # The manager model is wrapped for durable usage accounting with the
+    # controller's identity and the manager role.
+    model = manager["model"]
+    assert isinstance(model, UsageRecordingModel)
+    assert model.wrapped is manager_model
+    assert model.core is controller.core
+    assert model.run_id == controller.run_id
+    assert model.identity["role"] == "manager"

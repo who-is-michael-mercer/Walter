@@ -199,3 +199,80 @@ def test_main_reports_missing_run_as_friendly_domain_error(tmp_path, monkeypatch
     monkeypatch.setattr(cli.sys, "argv", ["walter", "run", "inspect", "missing-run"])
     with pytest.raises(SystemExit, match="Walter operation error"):
         cli.main()
+
+
+def _stub_usage_budget_path(monkeypatch, *, execute):
+    class Run:
+        id = "durable-run"
+        status = "active"
+        final_result = None
+
+    class Controller:
+        def inspect(self):
+            return Run()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "_controller", lambda *args, **kwargs: Controller())
+    monkeypatch.setattr(cli.RuntimeConfig, "from_env", classmethod(lambda cls: object()))
+    monkeypatch.setattr(cli, "build_walter", lambda value: object())
+    monkeypatch.setattr(cli, "_execute", execute)
+
+
+def test_one_shot_reports_usage_budget_exceeded_and_exits_nonzero(monkeypatch, capsys):
+    async def execute(walter, goal, **kwargs):
+        raise cli.UsageBudgetExceeded("Model-call budget exhausted")
+
+    _stub_usage_budget_path(monkeypatch, execute=execute)
+
+    import asyncio
+    with pytest.raises(SystemExit) as excinfo:
+        asyncio.run(cli._run_once("bounded goal", None, 3))
+
+    assert excinfo.value.code != 0
+    captured = capsys.readouterr()
+    assert "Usage budget exceeded: Model-call budget exhausted" in captured.out
+    assert "Run ID: durable-run" not in captured.out
+    assert "Local trace ID" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_interactive_reports_usage_budget_exceeded_and_continues(monkeypatch, capsys):
+    observed = {"closed": 0}
+
+    class Session:
+        def __init__(self, session_id, db):
+            pass
+
+        async def clear_session(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Controller:
+        def inspect(self):
+            raise AssertionError("inspect should not run after budget failure")
+
+        def close(self):
+            observed["closed"] += 1
+
+    async def execute(walter, goal, **kwargs):
+        raise cli.UsageBudgetExceeded("Model-call budget exhausted")
+
+    monkeypatch.setattr(cli, "SQLiteSession", Session)
+    monkeypatch.setattr(cli, "_controller", lambda goal: Controller())
+    monkeypatch.setattr(cli.RuntimeConfig, "from_env", classmethod(lambda cls: object()))
+    monkeypatch.setattr(cli, "build_walter", lambda value: object())
+    monkeypatch.setattr(cli, "_execute", execute)
+
+    responses = iter(["first goal", ":quit"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(responses))
+
+    import asyncio
+    asyncio.run(cli._run_interactive("fixture-session", 3))
+
+    captured = capsys.readouterr()
+    assert "Usage budget exceeded: Model-call budget exhausted" in captured.out
+    assert observed["closed"] == 1

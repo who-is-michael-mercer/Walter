@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from .runtime import RuntimeConfig, RuntimeConfigurationError, build_walter
 from .adapter import INITIAL_COMPLETION_CRITERION
+from .usage import UsageBudgetExceeded
 
 
 DEFAULT_SESSION = "main"
@@ -110,6 +111,13 @@ def _print_manager_output(result) -> None:
         print(f"Manager: {final_output}")
 
 
+def _report_usage_budget_exceeded(exc: UsageBudgetExceeded) -> None:
+    print(
+        f"Usage budget exceeded: {exc}. The run remains incomplete. "
+        "Raise the WALTER_MAX_* budget to continue."
+    )
+
+
 async def _run_once(goal: str, session_id: str | None, max_turns: int) -> None:
     RuntimeConfig.from_env()  # Validate before creating durable operational state.
     controller = _controller(goal)
@@ -123,6 +131,9 @@ async def _run_once(goal: str, session_id: str | None, max_turns: int) -> None:
         _print_outcome(controller)
         _print_manager_output(result)
         print(f"\nLocal trace ID (provider export disabled): {trace_id}")
+    except UsageBudgetExceeded as exc:
+        _report_usage_budget_exceeded(exc)
+        raise SystemExit(1) from exc
     finally:
         await _close_session(session)
         controller.close()
@@ -167,6 +178,8 @@ async def _run_interactive(session_id: str, max_turns: int) -> None:
                 print("\nRun interrupted.")
             except RuntimeConfigurationError as exc:
                 print(f"Walter configuration error: {exc}")
+            except UsageBudgetExceeded as exc:
+                _report_usage_budget_exceeded(exc)
             finally:
                 if controller is not None:
                     controller.close()
@@ -225,6 +238,9 @@ async def _resume_and_execute(run_id, max_turns):
             max_turns=max_turns)
         _print_outcome(controller)
         _print_manager_output(result)
+    except UsageBudgetExceeded as exc:
+        _report_usage_budget_exceeded(exc)
+        raise SystemExit(1) from exc
     finally:
         controller.close()
 

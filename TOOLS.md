@@ -5,7 +5,7 @@ Tools are constructed from a task's recorded capability profile. A worker cannot
 | Profile | Granted access |
 | --- | --- |
 | `model_only` | No external tools; typed reasoning output only. |
-| `researcher` | SDK hosted `WebSearchTool`; OpenRouter chat-completions support is provider-dependent and requires live verification. |
+| `researcher` | SDK hosted `WebSearchTool`; rejected by OpenRouter chat completions (verified 2026-09-20) — currently unusable with the configured provider. |
 | `repo_reader` | Read, list, and inspect diff inside an isolated candidate worktree. |
 | `developer_sandbox` | The same read tools plus bounded file writes and allowlisted `test`/`build`/`check` execution. |
 | `reviewer` | Read-only candidate inspection; no authorship, acceptance, approval, or promotion. |

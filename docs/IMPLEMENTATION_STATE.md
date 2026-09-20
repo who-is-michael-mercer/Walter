@@ -27,17 +27,33 @@ where it is still incomplete.
 
 ## Verified evidence
 
-- Offline suite: `159 passed, 1 skipped`; the skip is the opt-in live provider smoke.
+- Offline suite: `160 passed, 1 skipped`; the skip is the opt-in live provider smoke.
 - Readiness demo passes against real Bubblewrap.
+- Live provider smoke passes (2026-09-20).
 - One live model-driven end-to-end run completed on 2026-09-20 (run
   `1b6affd4233446de9093d6c4a92b8c6c`): the Manager planned, delegated a real
   worker, trusted validation passed, an independent model review passed, the
   Manager accepted, and the run completed. The run used 16 model calls,
   ~299k tokens, and ~$0.38, within its 300k-token budget.
+- Researcher probe (2026-09-20): the SDK hosted `WebSearchTool` is rejected by
+  OpenRouter chat completions (`UserError: Hosted tools are not supported`);
+  the durable path classified the failure honestly as `TOOL_FAILURE`.
+- First real external-repository run (2026-09-20, run
+  `04976c30a16c4b82aefa5a9da1894d59`, DeepSeek/Qwen workers): did not complete;
+  blocked honestly with attempts exhausted after three worker failures.
+  Full findings in `docs/first-real-run-gap-report.md`.
+- Eval runner (`evals/runner.py`): EVAL-001/002/003 pass offline against the
+  durable runtime (3/3).
 
 ## Known gaps and limitations
 
 - Only OpenRouter is supported as a provider.
+- The `researcher` profile is unusable with the configured provider (hosted
+  `WebSearchTool` rejected by chat completions; verified 2026-09-20).
+- `required_inputs` declared on a task are not registered by the CLI/adapter,
+  which can soft-lock delegation; the delegation-gate error does not name the
+  cause; `replan_tasks` add-path drops capability/checks. See
+  `docs/first-real-run-gap-report.md`.
 - Usage budgets are per-run and cumulative across the run's model calls.
 - The Manager loop is currently chatty: a small objective took ~13 Manager model calls.
 - Most root doctrine and all `prompts/`, `protocols/`, `templates/`, `runbooks/`,
@@ -54,3 +70,8 @@ where it is still incomplete.
   retaining conversation sessions.
 - DEC-003: Process isolation must fail closed if its backend is unavailable;
   working-directory restrictions alone are insufficient.
+- DEC-004 (2026-09-20): Schema-v1 support is dropped. The only operational
+  database of value (`.local/walter-operations.db`) is `user_version 2`, so the
+  deprecated compatibility fields (`WorkerResult.specialist_request`,
+  `ApprovalRequest.reason` alias) are removed. The v1→v2 migration function is
+  retained for now; its retirement is a separate later decision.

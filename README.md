@@ -36,7 +36,7 @@ WALTER_WORKER_MODEL=moonshotai/kimi-k3
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 ```
 
-OpenRouter is the only configured provider. `researcher` maps to the Agents SDK hosted `WebSearchTool`; compatibility through OpenRouter's chat-completions endpoint is provider-dependent and is not established by the offline suite. Research must block honestly if a live provider rejects that hosted tool. Live provider tests are opt-in.
+OpenRouter is the only configured provider. `researcher` maps to the Agents SDK hosted `WebSearchTool`; as verified on 2026-09-20, that hosted tool is rejected through OpenRouter's chat-completions endpoint (`UserError: Hosted tools are not supported with the ChatCompletions API`), so the `researcher` profile is currently unusable with the configured provider. The durable path handles this honestly: the delegation fails, the task is classified `TOOL_FAILURE`, and no artifact is created. A researcher-capable path would require a provider or tool change (e.g. a search-capable chat-completions tool or the OpenAI Responses API). Live provider tests are opt-in.
 
 Provider trace export and sensitive trace payloads remain disabled. The accepted `--trace-sensitive` option is a reserved compatibility no-op; CLI output labels workflow identifiers as `Local trace ID (provider export disabled)`.
 

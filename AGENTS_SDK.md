@@ -33,7 +33,7 @@ The model must call `inspect_run`, replace the initial sentinel through `set_com
 
 ## Capability profiles
 
-The canonical capability-profile table lives in TOOLS.md. Runtime notes specific to this boundary: the `researcher` profile maps to the SDK hosted `WebSearchTool`, whose OpenRouter chat-completions compatibility is provider-dependent and not proven by offline tests; acceptance review is always commissioned as a fresh `reviewer` instance distinct from the author.
+The canonical capability-profile table lives in TOOLS.md. Runtime notes specific to this boundary: the `researcher` profile maps to the SDK hosted `WebSearchTool`, which OpenRouter's chat-completions endpoint rejects (verified 2026-09-20), making that profile currently unusable with the configured provider; acceptance review is always commissioned as a fresh `reviewer` instance distinct from the author.
 
 Workers never receive grant-management, approval-decision, acceptance, promotion, or agent-creation tools. Workspace and worker IDs are bound into tool closures. Submissions must match the current assignment ID and worker. Recovered developer revisions receive a fresh workspace through audited `workspace.replaced`; the rejected candidate is recovered before replacement and the old workspace is cleaned.
 

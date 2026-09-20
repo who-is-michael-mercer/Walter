@@ -89,6 +89,78 @@ def test_one_shot_builds_manager_around_new_durable_run(monkeypatch, capsys):
     assert "Local trace ID (provider export disabled): trace" in output
 
 
+def _stub_run_once(monkeypatch, observed, *, result):
+    class Run:
+        id = "durable-run"
+        status = "active"
+        final_result = None
+
+    class Controller:
+        def inspect(self):
+            return Run()
+
+        def close(self):
+            observed["closed"] = True
+
+    monkeypatch.setattr(cli, "_controller", lambda goal: Controller())
+    monkeypatch.setattr(cli.RuntimeConfig, "from_env", classmethod(lambda cls: object()))
+    monkeypatch.setattr(cli, "build_walter", lambda value: object())
+
+    async def execute(walter, goal, **kwargs):
+        return result, "trace"
+
+    monkeypatch.setattr(cli, "_execute", execute)
+
+
+def test_one_shot_closes_synchronous_session_without_awaiting(monkeypatch):
+    observed = {}
+
+    class Session:
+        def __init__(self, session_id, db):
+            observed["session_id"] = session_id
+
+        def close(self):
+            observed["session_closed"] = True
+
+    monkeypatch.setattr(cli, "SQLiteSession", Session)
+    _stub_run_once(monkeypatch, observed, result=object())
+
+    import asyncio
+    asyncio.run(cli._run_once("bounded goal", "fixture-session", 3))
+
+    assert observed["session_id"] == "fixture-session"
+    assert observed["session_closed"] is True
+
+
+def test_one_shot_prints_manager_final_output(monkeypatch, capsys):
+    observed = {}
+
+    class Result:
+        final_output = "Run accepted; two tasks remain blocked."
+
+    _stub_run_once(monkeypatch, observed, result=Result())
+
+    import asyncio
+    asyncio.run(cli._run_once("bounded goal", None, 3))
+
+    output = capsys.readouterr().out
+    assert "Manager: Run accepted; two tasks remain blocked." in output
+
+
+def test_one_shot_skips_non_string_manager_output(monkeypatch, capsys):
+    observed = {}
+
+    class Result:
+        final_output = None
+
+    _stub_run_once(monkeypatch, observed, result=Result())
+
+    import asyncio
+    asyncio.run(cli._run_once("bounded goal", None, 3))
+
+    assert "Manager:" not in capsys.readouterr().out
+
+
 def test_legacy_trace_sensitive_flag_is_an_honest_noop(monkeypatch):
     monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "1")
     args = cli._parser().parse_args(["--trace-sensitive", "goal"])

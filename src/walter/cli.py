@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import inspect
 import os
 import json
 import sys
@@ -95,21 +96,35 @@ async def _execute(
     return result, workflow_trace.trace_id
 
 
+async def _close_session(session) -> None:
+    if session is None:
+        return
+    result = session.close()
+    if inspect.isawaitable(result):
+        await result
+
+
+def _print_manager_output(result) -> None:
+    final_output = getattr(result, "final_output", None)
+    if isinstance(final_output, str) and final_output.strip():
+        print(f"Manager: {final_output}")
+
+
 async def _run_once(goal: str, session_id: str | None, max_turns: int) -> None:
     RuntimeConfig.from_env()  # Validate before creating durable operational state.
     controller = _controller(goal)
     session = None
     try:
         session = SQLiteSession(session_id, _session_db()) if session_id else None
-        _, trace_id = await _execute(
+        result, trace_id = await _execute(
             build_walter(controller), goal, session=session,
             session_id=session_id, max_turns=max_turns,
         )
         _print_outcome(controller)
+        _print_manager_output(result)
         print(f"\nLocal trace ID (provider export disabled): {trace_id}")
     finally:
-        if session is not None:
-            await session.close()
+        await _close_session(session)
         controller.close()
 
 
@@ -141,11 +156,12 @@ async def _run_interactive(session_id: str, max_turns: int) -> None:
             try:
                 RuntimeConfig.from_env()  # Never orphan a run on missing provider configuration.
                 controller = _controller(goal)
-                _, trace_id = await _execute(
+                result, trace_id = await _execute(
                     build_walter(controller), goal, session=session,
                     session_id=session_id, max_turns=max_turns,
                 )
                 _print_outcome(controller)
+                _print_manager_output(result)
                 print(f"\nLocal trace ID (provider export disabled): {trace_id}")
             except KeyboardInterrupt:
                 print("\nRun interrupted.")
@@ -155,7 +171,7 @@ async def _run_interactive(session_id: str, max_turns: int) -> None:
                 if controller is not None:
                     controller.close()
     finally:
-        await session.close()
+        await _close_session(session)
 
 
 
@@ -204,10 +220,11 @@ async def _resume_and_execute(run_id, max_turns):
     controller = _controller(run_id=run_id)
     try:
         controller.core.resume(run_id)
-        await _execute(build_walter(controller),
+        result, _ = await _execute(build_walter(controller),
             "Continue this durable run from its persisted state. Inspect it first; recover interrupted assignments explicitly.",
             max_turns=max_turns)
         _print_outcome(controller)
+        _print_manager_output(result)
     finally:
         controller.close()
 

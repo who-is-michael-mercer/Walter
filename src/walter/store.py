@@ -2,13 +2,36 @@
 from __future__ import annotations
 import json
 import hashlib
+import logging
 import sqlite3
 from pathlib import Path
+from pydantic import ValidationError
 from .models import Event, Run, now
+
+logger = logging.getLogger(__name__)
 
 
 class ConcurrentUpdate(RuntimeError):
     pass
+
+
+class SnapshotIncompatible(ValueError):
+    """A persisted snapshot cannot be loaded by this build; remediation is required."""
+
+
+def _format_location(loc: tuple) -> str:
+    return ".".join(str(part) for part in loc) if loc else "<root>"
+
+
+def _drop_path(document: object, loc: tuple) -> None:
+    """Remove an extra field addressed by a Pydantic error loc from the raw payload."""
+    target = document
+    for part in loc[:-1]:
+        target = target[part] if not isinstance(target, list) else target[int(part)]
+    if isinstance(target, list):
+        del target[int(loc[-1])]
+    else:
+        target.pop(loc[-1], None)
 
 
 class SQLiteStore:
@@ -148,13 +171,64 @@ class SQLiteStore:
     def close(self):
         self.connection.close()
 
+    def _load_snapshot(self, run_id: str, payload: str) -> Run:
+        """Validate a snapshot, pruning only unknown fields written by newer code shapes.
+
+        Strict integrity is preserved: any defect other than an extra field (missing
+        required value, wrong type, malformed JSON, version drift) fails loudly with a
+        SnapshotIncompatible naming the run and the outstanding problems.
+        """
+        try:
+            document = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise SnapshotIncompatible(
+                f"Run {run_id}: snapshot is not valid JSON ({exc}).") from exc
+        if not isinstance(document, dict):
+            raise SnapshotIncompatible(
+                f"Run {run_id}: snapshot root must be a JSON object, found {type(document).__name__}.")
+        found_version = document.get("schema_version", self.SCHEMA_VERSION)
+        if found_version != self.SCHEMA_VERSION:
+            raise SnapshotIncompatible(
+                f"Run {run_id}: snapshot schema_version={found_version!r} but this build expects "
+                f"{self.SCHEMA_VERSION}. Migrate the operational store with a compatible Walter "
+                "version, or restore the run from a supported backup, before loading it.")
+        dropped: list[str] = []
+        for _ in range(1000):
+            try:
+                run = Run.model_validate(document)
+                break
+            except ValidationError as exc:
+                extras = [error["loc"] for error in exc.errors()
+                          if error["type"] == "extra_forbidden"]
+                if not extras:
+                    problems = "; ".join(
+                        f"{_format_location(error['loc'])}: {error['msg']}" for error in exc.errors())
+                    raise SnapshotIncompatible(
+                        f"Run {run_id}: snapshot failed validation and cannot be silently repaired: "
+                        f"{problems}") from exc
+                for loc in extras:
+                    _drop_path(document, loc)
+                    dropped.append(_format_location(loc))
+        else:
+            raise SnapshotIncompatible(
+                f"Run {run_id}: snapshot still failed validation after pruning unknown fields.")
+        if dropped:
+            logger.warning(
+                "Run %s: dropped %d unknown snapshot field(s) written by a newer code shape: %s",
+                run_id, len(dropped), ", ".join(sorted(dropped)))
+        return run
+
     def load(self, run_id: str) -> Run:
         row = self.connection.execute("SELECT version,snapshot FROM runs WHERE id=?", (run_id,)).fetchone()
         if row is None:
             raise KeyError(run_id)
-        run = Run.model_validate_json(row[1])
-        if run.id != run_id or run.schema_version != self.SCHEMA_VERSION or run.version != row[0]:
-            raise ValueError("Unsupported or inconsistent snapshot")
+        run = self._load_snapshot(run_id, row[1])
+        if run.id != run_id:
+            raise SnapshotIncompatible(
+                f"Run {run_id}: snapshot identity mismatch (embedded run id {run.id!r}).")
+        if run.version != row[0]:
+            raise SnapshotIncompatible(
+                f"Run {run_id}: snapshot version {run.version} does not match stored version {row[0]}.")
         event_rows = self.connection.execute(
             "SELECT sequence,payload FROM events WHERE run_id=? ORDER BY sequence", (run_id,)).fetchall()
         count = len(event_rows)
@@ -189,7 +263,7 @@ class SQLiteStore:
             row = self.connection.execute("SELECT version,snapshot FROM runs WHERE id=?", (run.id,)).fetchone()
             if (row is None and expected_version is not None) or (row is not None and row[0] != expected_version):
                 raise ConcurrentUpdate("Run changed; reload before applying this operation")
-            cursor = Run.model_validate_json(row[1]).event_cursor if row else 0
+            cursor = self._load_snapshot(run.id, row[1]).event_cursor if row else 0
             candidate.version = (expected_version or 0) + 1
             candidate.updated_at = now()
             candidate.event_cursor = cursor + len(events)

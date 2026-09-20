@@ -4,7 +4,7 @@ import pytest
 from walter.contracts import TaskPacket, WorkerResult
 from walter.models import ApprovalStatus, Event, ModelUsageRecord, TaskNode, TaskStatus
 from walter.orchestration import GateError, Orchestrator
-from walter.store import ConcurrentUpdate, SQLiteStore
+from walter.store import ConcurrentUpdate, SQLiteStore, SnapshotIncompatible
 
 
 def test_durable_reload_and_events(tmp_path):
@@ -130,6 +130,97 @@ def test_optimistic_lock_and_atomic_rollback(tmp_path):
     assert len(first.events(run.id)) == 2
     first.close()
     second.close()
+
+
+def test_unknown_snapshot_fields_from_newer_code_shape_are_pruned(tmp_path, caplog):
+    path = tmp_path / "drift.db"
+    store = SQLiteStore(path)
+    core = Orchestrator(store)
+    run = core.create_run("objective", ["criterion"])
+    core.add_tasks(run.id, [_task("readiness-candidate")])
+    before = store.load(run.id)
+    row = store.connection.execute("SELECT snapshot FROM runs WHERE id=?", (run.id,)).fetchone()
+    document = json.loads(row[0])
+    document["max_concurrent_specialists"] = 4
+    document["specialist_timeout_seconds"] = 300.0
+    document["reviews_in_flight"] = {}
+    document["tasks"]["readiness-candidate"]["review_attempts"] = 1
+    document["tasks"]["readiness-candidate"]["max_review_attempts"] = 3
+    store.connection.execute("UPDATE runs SET snapshot=? WHERE id=?",
+        (json.dumps(document, separators=(",", ":"), sort_keys=True), run.id))
+    with caplog.at_level("WARNING", logger="walter.store"):
+        loaded = store.load(run.id)
+    assert loaded == before
+    assert loaded.objective == "objective"
+    assert loaded.tasks["readiness-candidate"].packet.task_id == "readiness-candidate"
+    warning = caplog.text
+    for field in ("max_concurrent_specialists", "specialist_timeout_seconds", "reviews_in_flight",
+            "tasks.readiness-candidate.review_attempts", "tasks.readiness-candidate.max_review_attempts"):
+        assert field in warning
+    store.close()
+
+
+def test_drifted_run_can_be_mutated_and_resaved_with_pruned_fields(tmp_path):
+    path = tmp_path / "drifted-save.db"
+    store = SQLiteStore(path)
+    core = Orchestrator(store)
+    run = core.create_run("objective", ["criterion"])
+    core.add_tasks(run.id, [_task("drifted-task")])
+    current = store.load(run.id)
+    row = store.connection.execute("SELECT snapshot FROM runs WHERE id=?", (run.id,)).fetchone()
+    document = json.loads(row[0])
+    document["max_concurrent_specialists"] = 4
+    document["tasks"]["drifted-task"]["review_attempts"] = 1
+    store.connection.execute("UPDATE runs SET snapshot=? WHERE id=?",
+        (json.dumps(document, separators=(",", ":"), sort_keys=True), run.id))
+
+    updated = store.save(current, [Event(run_id=run.id, kind="test")], current.version)
+
+    snapshot = json.loads(store.connection.execute(
+        "SELECT snapshot FROM runs WHERE id=?", (run.id,)).fetchone()[0])
+    assert "max_concurrent_specialists" not in snapshot
+    assert "review_attempts" not in snapshot["tasks"]["drifted-task"]
+    reloaded = store.load(run.id)
+    assert updated.version == current.version + 1
+    assert reloaded.event_cursor == current.event_cursor + 1
+    assert reloaded.tasks["drifted-task"].packet.task_id == "drifted-task"
+    store.close()
+
+
+def test_snapshot_with_wrong_schema_version_is_actionable(tmp_path):
+    path = tmp_path / "version.db"
+    store = SQLiteStore(path)
+    run = Orchestrator(store).create_run("objective", ["criterion"])
+    row = store.connection.execute("SELECT snapshot FROM runs WHERE id=?", (run.id,)).fetchone()
+    document = json.loads(row[0])
+    document["schema_version"] = 99
+    store.connection.execute("UPDATE runs SET snapshot=? WHERE id=?",
+        (json.dumps(document, separators=(",", ":"), sort_keys=True), run.id))
+    with pytest.raises(SnapshotIncompatible) as excinfo:
+        store.load(run.id)
+    message = str(excinfo.value)
+    assert isinstance(excinfo.value, ValueError)
+    assert run.id in message
+    assert "99" in message
+    assert str(store.SCHEMA_VERSION) in message
+    assert "migrate" in message.lower()
+    store.close()
+
+
+def test_genuinely_corrupt_snapshot_is_not_silently_accepted(tmp_path):
+    path = tmp_path / "corrupt.db"
+    store = SQLiteStore(path)
+    run = Orchestrator(store).create_run("objective", ["criterion"])
+    row = store.connection.execute("SELECT snapshot FROM runs WHERE id=?", (run.id,)).fetchone()
+    document = json.loads(row[0])
+    del document["plan"]
+    store.connection.execute("UPDATE runs SET snapshot=? WHERE id=?",
+        (json.dumps(document, separators=(",", ":"), sort_keys=True), run.id))
+    with pytest.raises(SnapshotIncompatible) as excinfo:
+        store.load(run.id)
+    assert run.id in str(excinfo.value)
+    assert "plan" in str(excinfo.value)
+    store.close()
 
 
 def test_future_schema_and_event_corruption_rejected(tmp_path):

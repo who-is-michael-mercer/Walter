@@ -6,6 +6,7 @@ import logging
 from agents.models.interface import Model
 
 from .models import ModelUsageRecord
+from .usage import UsageBudget
 
 
 class UsageRecordingModel(Model):
@@ -16,10 +17,12 @@ class UsageRecordingModel(Model):
     """
 
     def __init__(self, wrapped, core, run_id: str, *, provider: str, model: str,
-                 role: str, task_id=None, assignment_id=None, worker_id=None):
+                 role: str, task_id=None, assignment_id=None, worker_id=None,
+                 budget: UsageBudget | None = None):
         self.wrapped = wrapped
         self.core = core
         self.run_id = run_id
+        self.budget = budget
         self.identity = dict(provider=provider, model=model, role=role,
                              task_id=task_id, assignment_id=assignment_id,
                              worker_id=worker_id)
@@ -27,6 +30,17 @@ class UsageRecordingModel(Model):
     async def get_response(self, system_instructions, input, model_settings, tools,
                            output_schema, handoffs, tracing, *, previous_response_id,
                            conversation_id, prompt):
+        if self.budget is not None:
+            # Pre-call enforcement: sum the run's already-recorded usage and
+            # raise before the wrapped model is called. A rejected call never
+            # happened, so no usage row is recorded for it.
+            records = self.core.get_run(self.run_id).usage_records
+            self.budget.check(
+                calls_used=len(records),
+                input_tokens_used=sum(r.input_tokens or 0 for r in records),
+                output_tokens_used=sum(r.output_tokens or 0 for r in records),
+                total_tokens_used=sum(r.total_tokens or 0 for r in records),
+            )
         # Preserve field presence before the SDK replaces absent provider usage
         # with zero counters. Do not mutate shared agent settings.
         from dataclasses import replace

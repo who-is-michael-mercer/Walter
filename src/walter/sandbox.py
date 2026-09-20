@@ -14,6 +14,7 @@ import errno
 import hashlib
 import hmac
 import json
+import logging
 import os
 from pathlib import Path, PurePosixPath
 import signal
@@ -29,6 +30,9 @@ import uuid
 
 class SandboxViolation(PermissionError):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 class SandboxUnavailable(RuntimeError):
@@ -279,6 +283,8 @@ class WorkspaceManager:
                 if grant.id in self._grants:
                     raise SandboxViolation("Duplicate workspace grant")
                 self._grants[grant.id] = grant
+            # Structural binding mismatches indicate tampering and must always raise,
+            # before environmental reconciliation can mask them.
             for grant in self._grants.values():
                 if grant.lifecycle == "active":
                     self._verify_grant_shape(grant)
@@ -286,6 +292,21 @@ class WorkspaceManager:
                         self._consumed_safety_approvals.get(grant.safety_approval_id or "") !=
                         grant.safety_approval_digest):
                     raise SandboxViolation("Safety grant is missing its consumed approval record")
+            # A signed grant that no longer matches this host environment is stale,
+            # not tampered: close it so a removed worktree or dependency environment
+            # cannot block manager construction.
+            reconciled = False
+            for ident, grant in list(self._grants.items()):
+                if grant.lifecycle != "active":
+                    continue
+                reason = self._stale_reason(grant)
+                if reason is None:
+                    continue
+                self._grants[ident] = replace(grant, lifecycle="closed")
+                reconciled = True
+                logger.warning("Closing stale workspace grant %s: %s", ident, reason)
+            if reconciled:
+                self._save()
         except SandboxViolation:
             raise
         except Exception as exc:
@@ -428,7 +449,6 @@ class WorkspaceManager:
         expected_root = self.state_root / ("candidate-" + grant.candidate_id)
         if (grant.repository != str(self.repository) or grant.root != str(expected_root) or
                 grant.branch != "walter-candidate/" + grant.candidate_id or
-                grant.dependency_root != str(self.dependency_root) or
                 not grant.run_id or not grant.task_id or not grant.worker_id or not grant.author_id or
                 grant.prohibited_roots != (str(self.repository),)):
             raise SandboxViolation("Workspace grant binding is invalid")
@@ -449,6 +469,20 @@ class WorkspaceManager:
         root = Path(grant.root)
         if root.parent != self.state_root or root.resolve() != root:
             raise SandboxViolation("Invalid workspace root")
+
+    def _stale_reason(self, grant: WorkspaceGrant) -> str | None:
+        """Describe why an active grant no longer matches this host, or None.
+
+        Only environmental drift is reported here; structural/binding mismatches
+        are integrity violations and remain the strict shape check's concern.
+        """
+        if not Path(grant.root).is_dir():
+            return "candidate worktree is missing"
+        if grant.dependency_root != str(self.dependency_root):
+            return "dependency root changed"
+        if not (Path(grant.dependency_root) / "bin/python").exists():
+            return "dependency environment is missing"
+        return None
 
     def _verify_worktree(self, grant: WorkspaceGrant):
         self._verify_grant_shape(grant)

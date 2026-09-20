@@ -1,6 +1,8 @@
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -451,3 +453,39 @@ def test_aggregate_resource_limits_are_practical_and_monitored(workspace):
     assert MAX_PROCESSES == 32
     assert MAX_AGGREGATE_RSS == 1_073_741_824
     assert MAX_SCRATCH_BYTES == 32_000_000
+
+
+def test_missing_candidate_root_is_closed_on_load(workspace):
+    manager, grant, repo = workspace
+    shutil.rmtree(grant.root)
+    reloaded = WorkspaceManager(repo)
+    assert reloaded._grants[grant.id].lifecycle == "closed"
+    with pytest.raises(SandboxViolation, match="Unknown or inactive"):
+        reloaded.inspect_grant(grant.id, worker_id="author")
+    assert json.loads((reloaded.state_root / "grants.json").read_text())
+
+
+def test_mismatched_dependency_root_is_closed_on_load(workspace):
+    manager, grant, repo = workspace
+    manager._grants[grant.id] = replace(grant, dependency_root="/nonexistent/dependency/venv")
+    manager._save()
+    reloaded = WorkspaceManager(repo)
+    assert reloaded._grants[grant.id].lifecycle == "closed"
+    with pytest.raises(SandboxViolation, match="Unknown or inactive"):
+        reloaded.read_file(grant.id, "hello.py", worker_id="author")
+
+
+def test_tampered_signed_manifest_still_raises(workspace):
+    manager, grant, repo = workspace
+    manager._grants[grant.id] = replace(grant, root=str(repo))
+    manager._save()
+    with pytest.raises(SandboxViolation, match="binding is invalid"):
+        WorkspaceManager(repo)
+
+
+def test_valid_active_grant_survives_reload(workspace):
+    manager, grant, repo = workspace
+    reloaded = WorkspaceManager(repo)
+    assert reloaded._grants[grant.id].lifecycle == "active"
+    assert reloaded.inspect_grant(grant.id, worker_id="author").root == grant.root
+    assert reloaded.read_file(grant.id, "hello.py", worker_id="author") == "VALUE = 1\n"

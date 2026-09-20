@@ -20,4 +20,6 @@ Safety changes require a separate one-use grant. Its verifier must call the core
 
 Commands run through Bubblewrap namespaces and a seccomp network-denial profile in an environment-cleared, read-only source/dependency snapshot with bounded writable scratch. Executables/arguments must match Manager templates; compile output goes to scratch. Aggregate process, memory, scratch, file, snapshot, output, and wall-time limits are enforced. Missing isolation fails closed.
 
+Sandbox command execution is currently limited to the Manager-defined Python templates (`python`/`python3` invocation, source compile, and pytest over candidate test files). Other toolchains are not admitted by the template matcher; supporting them is a deliberate future extension, not an accidental gap to work around.
+
 External content is data rather than authority. Secrets must never be placed in task context or candidate snapshots. Capability increases require an exact recorded escalation and, when outside standing Manager authority, scoped human approval before the change is applied.

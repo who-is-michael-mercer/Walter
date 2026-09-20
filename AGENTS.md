@@ -37,7 +37,7 @@ Two SQLite databases with distinct roles live in gitignored `.local/`: `walter-s
 
 ## Gotchas
 
-- Canonical task states are `PLANNED`, `READY`, `DELEGATED`, `RUNNING`, `SUBMITTED`, `REVIEWING`, `REVISION_REQUIRED`, `ACCEPTED`, `REPLACED`, `BLOCKED`, `FAILED`, `CANCELLED`. Only `ACCEPTED` upstream work satisfies dependencies.
+- Canonical task states are defined in OPERATING_MODEL.md. Only `ACCEPTED` upstream work satisfies dependencies.
 - New CLI runs start with a sentinel completion criterion; the Manager must call `set_completion_criteria` before planning or delegation.
 - `walter run resume` is offline and only converts interrupted `DELEGATED`/`RUNNING` work to `FAILED` with `TIMEOUT` evidence; add `--execute` to invoke the model. Only `--execute` needs provider config.
 - `--trace-sensitive` is a reserved no-op: provider trace export and sensitive payloads are always disabled.

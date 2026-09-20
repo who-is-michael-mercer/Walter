@@ -27,7 +27,7 @@ where it is still incomplete.
 
 ## Verified evidence
 
-- Offline suite: `152 passed, 1 skipped`; the skip is the opt-in live provider smoke.
+- Offline suite: `159 passed, 1 skipped`; the skip is the opt-in live provider smoke.
 - Readiness demo passes against real Bubblewrap.
 - One live model-driven end-to-end run completed on 2026-09-20 (run
   `1b6affd4233446de9093d6c4a92b8c6c`): the Manager planned, delegated a real

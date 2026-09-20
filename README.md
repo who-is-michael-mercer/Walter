@@ -14,7 +14,7 @@ The executable bootstrap provides:
 - isolated Git candidate worktrees with fail-closed Bubblewrap execution;
 - an Agents SDK adapter in which models propose actions and the kernel authorizes them.
 
-The canonical task states are `PLANNED`, `READY`, `DELEGATED`, `RUNNING`, `SUBMITTED`, `REVIEWING`, `REVISION_REQUIRED`, `ACCEPTED`, `REPLACED`, `BLOCKED`, `FAILED`, and `CANCELLED`. Only `ACCEPTED` upstream work satisfies dependencies.
+Canonical task states are defined in OPERATING_MODEL.md. Only `ACCEPTED` upstream work satisfies dependencies.
 
 ## Install and configure
 
@@ -84,7 +84,7 @@ New CLI runs begin with a sentinel criterion that cannot satisfy completion. The
 
 Operational schema v2 adds typed approval lifecycles and gates. Opening a v1 database migrates snapshots transactionally and retains exact source snapshots in `schema_migration_backups`; ambiguous legacy task approval IDs remain blocked until the Manager calls `recover_legacy_approval_gate` with an exact typed request.
 
-A worker that returns `blocked` or `needs_revision` produces a durable provisional result, not a candidate artifact. It cannot unlock dependencies and is classified/recovered without being mislabeled as a tool failure. A typed capability request carries requested profile, reason, and risk through `pending`, `approved`, `denied`, and `escalated` states. Repository-read and developer requests bind exact Manager-created workspaces into the approval scope. Applying an approved request atomically and idempotently updates the task capability/workspace and records `escalated`; rejection grants nothing and cleans the pending workspace. Redelegation reuses the approved workspace with read-only tools for `repo_reader` or bounded write/check tools for `developer_sandbox`. Developer tasks must declare `compile` or `pytest` at planning, replanning, and capability change. A developer candidate must add or modify at least one `test_*.py`/`*_test.py` file; `pytest` validates only the candidate's changed test files inside the isolated sandbox and fails if none are present. Model-facing replans are likewise always persisted behind exact human approval, even though trusted programmatic callers may use the low-level core for authorized low-impact replans.
+Provisional worker results, typed capability requests, approval-bound workspace escalation, and redelegation follow the lifecycle semantics in TASK_PROTOCOL.md and the capability rules in TOOLS.md; model-facing replans are always persisted behind exact human approval.
 
 Run verification with:
 

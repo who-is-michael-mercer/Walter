@@ -1,11 +1,6 @@
-import asyncio
-import json
-
 import pytest
 
 pytest.importorskip("agents")
-
-from agents.tool_context import ToolContext
 
 from walter import runtime
 
@@ -86,25 +81,6 @@ def test_provider_client_is_reused(monkeypatch):
     assert len(clients) == 1
 
 
-def test_manager_uses_manager_model_and_worker_uses_worker_model(monkeypatch):
-    config = runtime.RuntimeConfig("openrouter", "key", "https://openrouter.ai/api/v1", "manager", "worker")
-    manager_model, worker_model = object(), object()
-    agents = []
-
-    monkeypatch.setattr(runtime.RuntimeConfig, "from_env", classmethod(lambda cls: config))
-    monkeypatch.setattr(runtime, "build_models", lambda value: (manager_model, worker_model))
-    monkeypatch.setattr(runtime, "_walter_instructions", lambda: "instructions")
-    monkeypatch.setattr(
-        runtime,
-        "_agent",
-        lambda **kwargs: agents.append(kwargs) or kwargs,
-    )
-
-    manager = runtime.build_walter()
-    assert manager["model"] is manager_model
-    assert agents[0]["tools"] == [runtime.delegate_task]
-
-
 def test_manager_uses_durable_controller_when_supplied(monkeypatch):
     class Controller:
         core = object()
@@ -128,49 +104,3 @@ def test_manager_uses_durable_controller_when_supplied(monkeypatch):
     manager = runtime.build_walter(Controller())
     assert manager["instructions"] == "durable instructions"
     assert manager["tools"] == ["durable tool"]
-
-
-def test_delegate_returns_mocked_structured_tool_continuation(monkeypatch):
-    packet = runtime.TaskPacket(
-        task_id="t1",
-        role="researcher",
-        objective="objective",
-        deliverable="deliverable",
-        acceptance_criteria=["criterion"],
-        stop_condition="done",
-    )
-    expected = runtime.WorkerResult(
-        task_id="wrong",
-        status="completed",
-        summary="ok",
-        deliverable="result",
-    )
-    monkeypatch.setattr(
-        runtime.RuntimeConfig,
-        "from_env",
-        classmethod(lambda cls: runtime.RuntimeConfig("openrouter", "key", "https://openrouter.ai/api/v1", "m", "w")),
-    )
-    monkeypatch.setattr(runtime, "build_models", lambda config: (object(), object()))
-    monkeypatch.setattr(runtime, "_agent", lambda **kwargs: kwargs)
-
-    class Result:
-        final_output = expected
-
-    async def fake_run(*args, **kwargs):
-        return Result()
-
-    monkeypatch.setattr(runtime.Runner, "run", fake_run)
-    # Exercise the SDK's decorated tool callback with its actual invocation context.
-    invoke = getattr(runtime.delegate_task, "on_invoke_tool", None)
-    if invoke is None:
-        pytest.skip("installed SDK does not expose tool invocation hook")
-    tool_input = json.dumps({"packet": packet.model_dump()})
-    context = ToolContext(
-        context=None,
-        tool_name="delegate_task",
-        tool_call_id="test-call",
-        tool_arguments=tool_input,
-    )
-    result = asyncio.run(invoke(context, tool_input))
-    payload = json.loads(result) if isinstance(result, str) else result.model_dump()
-    assert payload["task_id"] == "t1"

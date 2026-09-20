@@ -201,6 +201,49 @@ def test_main_reports_missing_run_as_friendly_domain_error(tmp_path, monkeypatch
         cli.main()
 
 
+def _run_with_approval(tmp_path, monkeypatch):
+    setup_repository(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    store = cli._store()
+    core = Orchestrator(store)
+    run = core.create_run("approval fixture", ["fixture accepted"])
+    request = core.request_approval(run.id, "fixture", {"candidate": "one"}, "human boundary")
+    store.close()
+    return run, request
+
+
+def test_approve_unknown_approval_id_is_an_operation_error(tmp_path, monkeypatch):
+    run, _ = _run_with_approval(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.sys, "argv",
+                        ["walter", "run", "approve", run.id, "missing-approval", "--reason", "scope checked"])
+    with pytest.raises(SystemExit, match="Walter operation error"):
+        cli.main()
+
+
+def test_approve_already_decided_approval_is_an_operation_error(tmp_path, monkeypatch):
+    run, request = _run_with_approval(tmp_path, monkeypatch)
+    store = cli._store()
+    Orchestrator(store).decide_approval(run.id, request.id, True, "human", "Already decided")
+    store.close()
+    monkeypatch.setattr(cli.sys, "argv",
+                        ["walter", "run", "approve", run.id, request.id, "--reason", "second decision"])
+    with pytest.raises(SystemExit, match="Walter operation error"):
+        cli.main()
+
+
+def test_approve_deny_records_rejected_decision_with_local_identity(tmp_path, monkeypatch, capsys):
+    run, request = _run_with_approval(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.getpass, "getuser", lambda: "fixture-user")
+    monkeypatch.setattr(cli.os, "getuid", lambda: 1234)
+    cli._operations(["approve", run.id, request.id, "--deny", "--reason", "scope not acceptable"])
+    denied = json.loads(capsys.readouterr().out)
+    decision = denied["approval_decisions"][request.id]
+    assert decision["approved"] is False
+    assert decision["status"] == "rejected"
+    assert decision["human_id"] == "local-os:fixture-user:uid:1234"
+    assert denied["approvals"][request.id]["status"] == "rejected"
+
+
 def _stub_usage_budget_path(monkeypatch, *, execute):
     class Run:
         id = "durable-run"

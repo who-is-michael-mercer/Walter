@@ -230,6 +230,27 @@ def test_approved_capability_change_cannot_bypass_executable_check(kernel):
     assert core.get_run(rid) == before
 
 
+def test_delegate_gate_names_the_precise_blocker(kernel):
+    core, rid = kernel
+    needs_input = task("needs-input")
+    needs_input.packet.required_inputs = ["calc.py"]
+    core.add_tasks(rid, [needs_input, task("budgeted")])
+    with pytest.raises(GateError, match="Task is not ready: Required input is unavailable: calc.py"):
+        core.delegate(rid, "needs-input", "worker")
+    core.register_input(rid, "calc.py", "sha256:abc")
+    with pytest.raises(GateError, match="Worker identity is not delegatable"):
+        core.delegate(rid, "needs-input", "manager")
+    core.delegate(rid, "needs-input", "worker")
+
+    limited = core.reload(rid).tasks["budgeted"]
+    for attempt in range(limited.max_attempts):
+        core.delegate(rid, "budgeted", f"worker-{attempt}")
+        core.fail(rid, "budgeted", FailureClass.TIMEOUT, f"attempt {attempt} interrupted")
+        core.recover(rid, core.get_run(rid).failures[-1].id, "retry after interruption")
+    with pytest.raises(GateError, match=r"Attempt budget exhausted \(3/3\)"):
+        core.delegate(rid, "budgeted", "worker-final")
+
+
 def test_resume_no_silent_rerun(kernel):
     core, rid = kernel
     core.add_tasks(rid, [task()])

@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -73,7 +75,8 @@ def test_manager_tool_surface_has_no_trust_forging_tools():
     controller = controller_for(TaskNode(packet=packet(), required_checks=["result_schema"]))
     tools = {item.name: item for item in controller.tools()}
     assert set(tools) == {
-        "inspect_run", "set_completion_criteria", "plan_tasks", "delegate_task",
+        "inspect_run", "set_completion_criteria", "register_repository_inputs",
+        "plan_tasks", "delegate_task",
         "validate_task", "review_task", "accept_task", "recover_task", "replan_tasks",
         "apply_replan",
         "request_capability_change", "apply_capability_change",
@@ -97,6 +100,76 @@ def test_placeholder_criteria_block_planning_and_delegation():
     assert controller.inspect().plan.completion_criteria == [
         "A persisted artifact passes the declared result schema check"
     ]
+
+
+def _repository_controller(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    (repository / "test_calc.py").write_text("def test_add():\n    assert True\n")
+    core = Orchestrator(SQLiteStore())
+    run = core.create_run("use repository inputs", ["registered inputs unlock delegation"])
+    return DurableController(core, run.id, SimpleNamespace(repository=repository))
+
+
+def test_register_repository_inputs_computes_trusted_digests(tmp_path):
+    controller = _repository_controller(tmp_path)
+    registered = controller.register_repository_inputs(["calc.py", "test_calc.py"])
+    repository = controller.workspaces.repository
+    assert registered["calc.py"] == (
+        "sha256:" + hashlib.sha256((repository / "calc.py").read_bytes()).hexdigest())
+    run = controller.inspect()
+    assert set(run.available_inputs) == {"calc.py", "test_calc.py"}
+    assert run.available_inputs["calc.py"] == registered["calc.py"]
+
+
+def test_register_repository_inputs_rejects_unsafe_paths(tmp_path):
+    controller = _repository_controller(tmp_path)
+    for bad in ("../outside.py", "/etc/hostname", ".git/HEAD", "missing.py"):
+        with pytest.raises(ValueError):
+            controller.register_repository_inputs([bad])
+    assert controller.inspect().available_inputs == {}
+
+
+def test_tool_receipt_is_compact_and_inspect_run_stays_full():
+    controller = controller_for(TaskNode(packet=packet(), required_checks=["result_schema"]))
+    core = controller.core
+    assignment = core.delegate(controller.run_id, "task", "worker")
+    core.start(controller.run_id, "task")
+    artifact = core.submit(controller.run_id, "task", assignment.id, "worker",
+        WorkerResult(task_id="task", status="completed", summary="done",
+                     deliverable="FULL-DELIVERABLE-CONTENT-MARKER"))
+    receipt = json.loads(controller._receipt())
+    assert receipt["tasks"]["task"]["status"] == "SUBMITTED"
+    assert receipt["tasks"]["task"]["artifact_ids"] == [artifact.id]
+    assert receipt["artifacts"][artifact.id] == "candidate"
+    assert "FULL-DELIVERABLE-CONTENT-MARKER" not in json.dumps(receipt)
+    full = controller.inspect().model_dump_json()
+    assert "FULL-DELIVERABLE-CONTENT-MARKER" in full
+
+
+def test_planning_rejects_unresolvable_required_inputs_until_registered(tmp_path):
+    controller = _repository_controller(tmp_path)
+    wanted = packet()
+    wanted.required_inputs = ["calc.py", "test_calc.py"]
+    missing = controller._unresolvable_inputs([wanted])
+    assert missing == {"task": ["calc.py", "test_calc.py"]}
+    controller.register_repository_inputs(["calc.py", "test_calc.py"])
+    assert controller._unresolvable_inputs([wanted]) == {}
+    # Once registered, the kernel readiness gate that soft-locked the real run
+    # clears: the task becomes delegatable.
+    controller.core.add_tasks(controller.run_id, [TaskNode(
+        packet=wanted, required_checks=["result_schema"])])
+    assignment = controller.core.delegate(controller.run_id, "task", "worker")
+    assert assignment.task_id == "task"
+
+
+def test_planning_accepts_same_batch_task_references(tmp_path):
+    controller = _repository_controller(tmp_path)
+    upstream = packet("upstream")
+    downstream = packet("downstream")
+    downstream.required_inputs = ["upstream"]
+    assert controller._unresolvable_inputs([upstream, downstream]) == {}
 
 
 def test_workspace_tool_surface_matches_read_and_write_grants():
@@ -304,6 +377,36 @@ def test_stale_worker_cannot_fail_new_running_assignment(monkeypatch, stale_outc
         assert controller.inspect().tasks["task"].status == "SUBMITTED"
 
     asyncio.run(scenario())
+
+
+def test_replan_add_path_preserves_declared_capability_and_checks():
+    controller = controller_for(TaskNode(packet=packet(), required_checks=["result_schema"]))
+    developer_packet = packet("dev-fix")
+    proposal, approval = controller.propose_replan(
+        trigger="developer lane required", evidence=["implementation evidence needed"],
+        add=[developer_packet], remove=[], reopen=[], dependencies={}, risks=[],
+        add_capabilities=["developer_sandbox"], add_checks=[["pytest"]],
+    )
+    added = proposal.add[0]
+    assert added.capability == CapabilityProfile.DEVELOPER_SANDBOX
+    assert added.required_checks == ["pytest"]
+    assert added.review_required and added.high_risk
+    controller.core.decide_approval(controller.run_id, approval.id, True,
+                                    "human", "approve exact developer replan")
+    controller.apply_replan(proposal.id)
+    task = controller.inspect().tasks["dev-fix"]
+    assert task.capability == CapabilityProfile.DEVELOPER_SANDBOX
+    assert task.required_checks == ["pytest"]
+
+
+def test_replan_add_path_rejects_mismatched_capability_declarations():
+    controller = controller_for(TaskNode(packet=packet(), required_checks=["result_schema"]))
+    with pytest.raises(ValueError, match="one capability and check list per packet"):
+        controller.propose_replan(
+            trigger="bad declaration", evidence=["gap"], add=[packet("dev-fix")],
+            remove=[], reopen=[], dependencies={}, risks=[],
+            add_capabilities=["developer_sandbox", "model_only"], add_checks=[["pytest"]],
+        )
 
 
 def test_material_replan_waits_for_exact_approval_and_rejection_cannot_apply():

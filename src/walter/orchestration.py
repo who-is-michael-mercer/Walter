@@ -182,14 +182,14 @@ class Orchestrator:
             if value in run.tasks:
                 upstream = run.tasks[value]
                 if upstream.status != TaskStatus.ACCEPTED or not upstream.artifact_ids:
-                    raise GateError("Input task is not accepted")
+                    raise GateError(f"Input task is not accepted: {value} ({upstream.status.value})")
                 artifact_id = upstream.artifact_ids[-1]
             elif value in run.artifacts:
                 artifact_id = value
             elif value in run.available_inputs and value not in task.packet.dependencies:
                 continue
             else:
-                raise GateError("Required input is unavailable")
+                raise GateError(f"Required input is unavailable: {value}")
             self._validate_accepted_artifact(run, artifact_id, visiting, checked)
             if artifact_id not in inputs:
                 inputs.append(artifact_id)
@@ -220,23 +220,29 @@ class Orchestrator:
         if not task.artifact_ids or set(run.artifacts[task.artifact_ids[-1]].input_artifact_ids) != set(inputs):
             raise GateError("Candidate input provenance does not match declared inputs")
 
-    def _ready(self, run, task):
+    def _readiness_blocker(self, run, task) -> str | None:
+        """Precise reason a task is not delegatable, or None when it is ready."""
         try:
             self._input_artifact_ids(run, task)
-        except GateError:
-            return False
+        except GateError as exc:
+            return str(exc)
         if task.capability == CapabilityProfile.DEVELOPER_SANDBOX and not task.workspace_id:
-            return False
+            return "developer sandbox task has no bound workspace"
         if task.approval_ids:
-            return False
+            return "task has unresolved approval gates"
         for gate in task.approval_gates:
             request = run.approvals.get(gate.request_id)
             decision = run.approval_decisions.get(gate.request_id)
             if (not request or request.status != ApprovalStatus.APPROVED or not decision or
                     not decision.approved or request.action != gate.action or
                     request.scope_digest != gate.scope_digest or request.scope_json != gate.scope_json):
-                return False
-        return bool(task.packet.acceptance_criteria)
+                return f"approval gate {gate.request_id} is not exactly approved"
+        if not task.packet.acceptance_criteria:
+            return "task packet has no acceptance criteria"
+        return None
+
+    def _ready(self, run, task):
+        return self._readiness_blocker(run, task) is None
 
     def _refresh(self, run, events):
         for task in run.tasks.values():
@@ -343,8 +349,14 @@ class Orchestrator:
     def delegate(self, run_id: str, task_id: str, worker_id: str) -> WorkerAssignment:
         def operation(run, events):
             task = run.tasks[task_id]
-            if not worker_id.strip() or worker_id == self.manager_id or not self._ready(run, task) or task.attempts >= task.max_attempts:
-                raise GateError("Worker, readiness or attempt gate failed")
+            if not worker_id.strip() or worker_id == self.manager_id:
+                raise GateError("Worker identity is not delegatable")
+            if task.attempts >= task.max_attempts:
+                raise GateError(
+                    f"Attempt budget exhausted ({task.attempts}/{task.max_attempts})")
+            blocker = self._readiness_blocker(run, task)
+            if blocker:
+                raise GateError(f"Task is not ready: {blocker}")
             if task.status not in {TaskStatus.READY, TaskStatus.REVISION_REQUIRED}:
                 raise GateError("Task is not delegatable")
             assignment = WorkerAssignment(worker_id=worker_id, task_id=task_id, capability=task.capability, workspace_id=task.workspace_id)

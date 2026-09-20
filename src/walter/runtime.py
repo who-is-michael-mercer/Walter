@@ -48,6 +48,9 @@ def _optional_non_negative_int(values: Mapping[str, str], name: str) -> int | No
     return parsed
 
 
+DEFAULT_WORKER_MAX_TURNS = 24
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """Provider-neutral runtime settings resolved from the environment."""
@@ -58,6 +61,7 @@ class RuntimeConfig:
     manager_model: str
     worker_model: str
     budget: UsageBudget | None = None
+    worker_max_turns: int = DEFAULT_WORKER_MAX_TURNS
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "RuntimeConfig":
@@ -75,6 +79,11 @@ class RuntimeConfig:
         if not api_key:
             raise RuntimeConfigurationError(
                 "OPENROUTER_API_KEY is not set. Add it to the environment or a local .env file."
+            )
+        if api_key == "your_openrouter_key_here":
+            raise RuntimeConfigurationError(
+                "OPENROUTER_API_KEY is still the .env.example placeholder. "
+                "Set a real OpenRouter key before starting a provider-backed run."
             )
 
         base_url = _normalize_base_url(
@@ -105,7 +114,14 @@ class RuntimeConfig:
             else None
         )
 
-        return cls(provider, api_key, base_url, manager_model, worker_model, budget)
+        worker_max_turns = _optional_non_negative_int(values, "WALTER_WORKER_MAX_TURNS")
+        if worker_max_turns is not None and worker_max_turns < 1:
+            raise RuntimeConfigurationError(
+                "WALTER_WORKER_MAX_TURNS must be at least 1."
+            )
+
+        return cls(provider, api_key, base_url, manager_model, worker_model, budget,
+                   worker_max_turns or DEFAULT_WORKER_MAX_TURNS)
 
 
 def _should_replay_reasoning_content(context: object, base_url: str) -> bool:

@@ -36,8 +36,9 @@ class ReviewResult(BaseModel):
 DURABLE_INSTRUCTIONS = """
 All work is governed by the durable run below.
 Use inspect_run to learn operational truth. First define measurable completion criteria with
-set_completion_criteria. Then define narrow task packets and predeclare checks with plan_tasks,
-and delegate only eligible tasks. Worker submission is provisional. Run validate_task for actual
+set_completion_criteria. Register repository files with register_repository_inputs before
+declaring them as required_inputs. Then define narrow task packets and predeclare checks with
+plan_tasks, and delegate only eligible tasks. Worker submission is provisional. Run validate_task for actual
 programmatic checks and review_task for a fresh independent reviewer, then explicitly accept_task.
 Use recover_task or replan_tasks when evidence requires changes. Never manufacture test or
 review evidence. For candidate actions use request_candidate_approval and
@@ -118,6 +119,39 @@ class DurableController:
     def _criteria_defined(self) -> bool:
         return self.inspect().plan.completion_criteria != [INITIAL_COMPLETION_CRITERION]
 
+    def _receipt(self) -> str:
+        """Compact durable status for tool results; inspect_run stays the full truth."""
+        from .models import ApprovalStatus
+
+        run = self.inspect()
+        return json.dumps({
+            "run_id": run.id,
+            "status": run.status,
+            "criteria_defined": self._criteria_defined(),
+            "tasks": {task_id: {
+                "status": task.status.value,
+                "attempts": task.attempts,
+                "revisions": task.revisions,
+                "capability": task.capability.value,
+                "artifact_ids": task.artifact_ids,
+                "blocker": task.blocker,
+            } for task_id, task in run.tasks.items()},
+            "artifacts": {artifact_id: artifact.status
+                          for artifact_id, artifact in run.artifacts.items()},
+            "pending_approvals": [{
+                "id": approval.id, "action": approval.action, "target": approval.target,
+            } for approval in run.approvals.values()
+                if approval.status == ApprovalStatus.PENDING],
+            "failures": [{
+                "id": failure.id, "task_id": failure.task_id,
+                "classification": failure.classification.value,
+            } for failure in run.failures],
+            "usage": {
+                "calls": len(run.usage_records),
+                "total_tokens": sum(record.total_tokens or 0 for record in run.usage_records),
+            },
+        })
+
     def set_criteria(self, criteria: list[str]):
         objective = self.inspect().objective.strip().casefold()
         normalized = [criterion.strip() for criterion in criteria]
@@ -127,6 +161,71 @@ class DurableController:
                 or INITIAL_COMPLETION_CRITERION in normalized):
             raise ValueError("Completion criteria must be distinct, measurable, and more specific than the objective")
         self.core.set_completion_criteria(self.run_id, normalized)
+
+    def _task_nodes(self, packets: list[TaskPacket], capabilities: list[str],
+                    checks: list[list[str]]) -> list:
+        """Build TaskNodes with declared capability profiles and trusted checks."""
+        from .models import CapabilityProfile, TaskNode
+
+        if not (len(packets) == len(capabilities) == len(checks)):
+            raise ValueError("Provide one capability and check list per packet")
+        unresolvable = self._unresolvable_inputs(packets)
+        if unresolvable:
+            raise ValueError(
+                "Declared required_inputs are not resolvable: "
+                + json.dumps(unresolvable, sort_keys=True)
+                + ". Register repository files with register_repository_inputs before"
+                " planning, or reference task IDs or accepted artifact IDs.")
+        tasks = []
+        for packet, profile, required in zip(packets, capabilities, checks):
+            capability = CapabilityProfile(profile)
+            if capability == CapabilityProfile.REVIEWER:
+                raise ValueError("Reviewer instances are commissioned only through review_task")
+            if not set(required) <= {"result_schema", "compile", "pytest"}:
+                raise ValueError("Unknown trusted check")
+            if capability == CapabilityProfile.DEVELOPER_SANDBOX and not {"compile", "pytest"}.intersection(required):
+                raise ValueError("Development requires a predeclared executable check")
+            tasks.append(TaskNode(packet=packet, capability=capability,
+                                  required_checks=required or ["result_schema"], review_required=True,
+                                  high_risk=capability == CapabilityProfile.DEVELOPER_SANDBOX))
+        return tasks
+
+    def _unresolvable_inputs(self, packets: list[TaskPacket]) -> dict:
+        """Declared required_inputs that cannot resolve to any durable reference."""
+        run = self.inspect()
+        batch_ids = {packet.task_id for packet in packets}
+        missing = {
+            packet.task_id: [value for value in packet.required_inputs
+                             if value not in run.available_inputs
+                             and value not in run.tasks
+                             and value not in run.artifacts
+                             and value not in batch_ids]
+            for packet in packets
+        }
+        return {key: value for key, value in missing.items() if value}
+
+    def register_repository_inputs(self, paths: list[str]) -> dict:
+        """Register target-repository files as named run inputs.
+
+        Trusted code reads each file and computes its digest; the model only
+        names paths. The kernel stores the immutable reference, which makes the
+        name usable as a declared ``required_inputs`` entry.
+        """
+        root = (self.workspaces.repository if self.workspaces is not None
+                else Path.cwd()).resolve()
+        registered = {}
+        for raw in paths:
+            rel = Path(raw)
+            if rel.is_absolute() or ".." in rel.parts or ".git" in rel.parts:
+                raise ValueError(f"Input path must stay inside the target repository: {raw}")
+            candidate = (root / rel).resolve()
+            if not candidate.is_relative_to(root) or not candidate.is_file():
+                raise ValueError(f"Input path is not a regular repository file: {raw}")
+            name = rel.as_posix()
+            digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            self.core.register_input(self.run_id, name, f"sha256:{digest}")
+            registered[name] = f"sha256:{digest}"
+        return registered
 
     def candidate_scope(self, task_id: str, *, target: str) -> dict:
         task, artifact = self._candidate(task_id)
@@ -157,16 +256,20 @@ class DurableController:
     def propose_replan(self, *, trigger: str, evidence: list[str], add: list[TaskPacket],
                        remove: list[str], reopen: list[str],
                        dependencies: dict[str, list[str]] | None = None,
-                       risks: list[str] | None = None):
-        from .models import ReplanProposal, TaskNode
+                       risks: list[str] | None = None,
+                       add_capabilities: list[str] | None = None,
+                       add_checks: list[list[str]] | None = None):
+        from .models import ReplanProposal
 
         run = self.inspect()
         dependencies = dependencies or {}
+        capabilities = add_capabilities or ["model_only"] * len(add)
+        required_checks = add_checks or [["result_schema"]] * len(add)
         proposal = ReplanProposal(
             base_revision=run.plan.revision,
             trigger=trigger,
             evidence=evidence,
-            add=[TaskNode(packet=packet) for packet in add],
+            add=self._task_nodes(add, capabilities, required_checks),
             remove=remove,
             reopen=reopen,
             dependencies=dependencies,
@@ -289,14 +392,19 @@ class DurableController:
                                     budget=config.budget)
         agent = runtime._agent(name=name, instructions=instructions, output_type=output_type,
                                tools=tools, model=model)
-        result = await Runner.run(agent, input=input, max_turns=12,
+        result = await Runner.run(agent, input=input, max_turns=config.worker_max_turns,
                                   run_config=RunConfig(trace_include_sensitive_data=runtime._trace_sensitive_enabled()))
         if not isinstance(result.final_output, output_type):
             raise TypeError("Specialist returned an unexpected structured output")
         return result.final_output
 
     def tools(self):
-        from .models import TaskNode, CapabilityProfile, FailureClass, ReplanProposal
+        from .models import FailureClass
+
+        @tool
+        def register_repository_inputs(paths: list[str]) -> str:
+            """Register target-repo files as named inputs with trusted digests, before declaring them as required_inputs."""
+            return json.dumps(self.register_repository_inputs(paths), sort_keys=True)
 
         @tool
         def inspect_run() -> str:
@@ -307,29 +415,15 @@ class DurableController:
         def set_completion_criteria(criteria: list[str]) -> str:
             """Define measurable completion criteria before creating or delegating tasks."""
             self.set_criteria(criteria)
-            return self.inspect().model_dump_json()
+            return self._receipt()
 
         @tool
         def plan_tasks(packets: list[TaskPacket], capabilities: list[str], checks: list[list[str]]) -> str:
             """Add initial task DAG. Checks may be result_schema, compile, or pytest."""
             if not self._criteria_defined():
                 raise ValueError("Define measurable completion criteria before planning")
-            if not (len(packets) == len(capabilities) == len(checks)):
-                raise ValueError("Provide one capability and check list per packet")
-            tasks = []
-            for packet, profile, required in zip(packets, capabilities, checks):
-                capability = CapabilityProfile(profile)
-                if capability == CapabilityProfile.REVIEWER:
-                    raise ValueError("Reviewer instances are commissioned only through review_task")
-                if not set(required) <= {"result_schema", "compile", "pytest"}:
-                    raise ValueError("Unknown trusted check")
-                if capability == CapabilityProfile.DEVELOPER_SANDBOX and not {"compile", "pytest"}.intersection(required):
-                    raise ValueError("Development requires a predeclared executable check")
-                tasks.append(TaskNode(packet=packet, capability=capability,
-                                      required_checks=required or ["result_schema"], review_required=True,
-                                      high_risk=capability == CapabilityProfile.DEVELOPER_SANDBOX))
-            self.core.add_tasks(self.run_id, tasks)
-            return self.inspect().model_dump_json()
+            self.core.add_tasks(self.run_id, self._task_nodes(packets, capabilities, checks))
+            return self._receipt()
 
         @tool
         async def delegate_task(task_id: str) -> str:
@@ -340,33 +434,35 @@ class DurableController:
         def validate_task(task_id: str) -> str:
             """Run predeclared checks through trusted executors; takes no claimed pass flag."""
             self.validate(task_id)
-            return self.inspect().model_dump_json()
+            return self._receipt()
 
         @tool
         async def review_task(task_id: str) -> str:
             """Commission a fresh read-only reviewer with candidate and validation evidence."""
             await self.review(task_id)
-            return self.inspect().model_dump_json()
+            return self._receipt()
 
         @tool
         def accept_task(task_id: str, reason: str) -> str:
             """Request Manager acceptance after required validation and independent review."""
             self.core.accept(self.run_id, task_id, reason=reason,
                              workspace_fingerprint=self._fingerprint(task_id))
-            return self.inspect().model_dump_json()
+            return self._receipt()
 
         @tool
         def recover_task(task_id: str, classification: str, evidence: str, reason: str) -> str:
             """Classify a failure and apply its bounded recovery route."""
             failure = self.core.fail(self.run_id, task_id, FailureClass(classification), evidence)
             self.core.recover(self.run_id, failure.id, reason=reason)
-            return self.inspect().model_dump_json()
+            return self._receipt()
 
         @tool
         def replan_tasks(trigger: str, evidence: list[str], add: list[TaskPacket],
                          remove: list[str], reopen: list[str],
-                         dependencies_json: str, risks: list[str]) -> str:
-            """Persist an exact runtime replan pending scoped human approval."""
+                         dependencies_json: str, risks: list[str],
+                         add_capabilities: list[str] | None = None,
+                         add_checks: list[list[str]] | None = None) -> str:
+            """Persist an exact runtime replan pending scoped human approval. Added packets keep their declared capability and checks via add_capabilities/add_checks, as in plan_tasks."""
             dependencies = json.loads(dependencies_json)
             if not isinstance(dependencies, dict) or any(
                     not isinstance(key, str) or not isinstance(value, list)
@@ -376,17 +472,19 @@ class DurableController:
             proposal, approval = self.propose_replan(
                 trigger=trigger, evidence=evidence, add=add, remove=remove, reopen=reopen,
                 dependencies=dependencies, risks=risks,
+                add_capabilities=add_capabilities, add_checks=add_checks,
             )
             return json.dumps({
                 "proposal": proposal.model_dump(mode="json"),
                 "approval": approval.model_dump(mode="json") if approval else None,
-                "run": self.inspect().model_dump(mode="json"),
+                "run": json.loads(self._receipt()),
             })
 
         @tool
         def apply_replan(proposal_id: str) -> str:
             """Apply a persisted replan; the kernel enforces any exact human approval gate."""
-            return self.apply_replan(proposal_id).model_dump_json()
+            self.apply_replan(proposal_id)
+            return self._receipt()
 
         @tool
         def request_capability_change(capability_request_id: str, reason: str) -> str:
@@ -398,7 +496,8 @@ class DurableController:
         @tool
         def apply_capability_change(capability_request_id: str) -> str:
             """Apply only a linked, exact, human-approved capability request."""
-            return self.apply_capability_change(capability_request_id).model_dump_json()
+            self.apply_capability_change(capability_request_id)
+            return self._receipt()
 
         @tool
         def request_approval(action: str, scope_json: str, reason: str) -> str:
@@ -430,12 +529,13 @@ class DurableController:
         def finish_run(summary: str, criterion_evidence_json: str) -> str:
             """Complete only when the kernel confirms all required artifacts accepted and gates clear."""
             self.core.complete(self.run_id, summary, criterion_evidence=json.loads(criterion_evidence_json))
-            return self.inspect().model_dump_json()
+            return self._receipt()
 
-        return [inspect_run, set_completion_criteria, plan_tasks, delegate_task, validate_task,
-                review_task, accept_task, recover_task, replan_tasks, apply_replan,
-                request_capability_change, apply_capability_change, request_approval,
-                request_candidate_approval, authorize_candidate_action, finish_run]
+        return [inspect_run, set_completion_criteria, register_repository_inputs, plan_tasks,
+                delegate_task, validate_task, review_task, accept_task, recover_task,
+                replan_tasks, apply_replan, request_capability_change, apply_capability_change,
+                request_approval, request_candidate_approval, authorize_candidate_action,
+                finish_run]
 
     async def delegate(self, task_id: str):
         from .models import CapabilityProfile, FailureClass

@@ -11,6 +11,26 @@ def test_config_requires_openrouter_key():
         runtime.RuntimeConfig.from_env({})
 
 
+def test_config_rejects_placeholder_openrouter_key():
+    with pytest.raises(runtime.RuntimeConfigurationError, match="placeholder"):
+        runtime.RuntimeConfig.from_env(
+            {"OPENROUTER_API_KEY": "your_openrouter_key_here"})
+
+
+def test_worker_max_turns_defaults_and_validates():
+    default = runtime.RuntimeConfig.from_env({"OPENROUTER_API_KEY": "test"})
+    assert default.worker_max_turns == runtime.DEFAULT_WORKER_MAX_TURNS
+    configured = runtime.RuntimeConfig.from_env(
+        {"OPENROUTER_API_KEY": "test", "WALTER_WORKER_MAX_TURNS": "40"})
+    assert configured.worker_max_turns == 40
+    with pytest.raises(runtime.RuntimeConfigurationError, match="WALTER_WORKER_MAX_TURNS"):
+        runtime.RuntimeConfig.from_env(
+            {"OPENROUTER_API_KEY": "test", "WALTER_WORKER_MAX_TURNS": "0"})
+    with pytest.raises(runtime.RuntimeConfigurationError, match="WALTER_WORKER_MAX_TURNS"):
+        runtime.RuntimeConfig.from_env(
+            {"OPENROUTER_API_KEY": "test", "WALTER_WORKER_MAX_TURNS": "many"})
+
+
 def test_config_rejects_non_openrouter_provider():
     with pytest.raises(
         runtime.RuntimeConfigurationError,

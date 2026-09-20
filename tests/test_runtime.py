@@ -3,6 +3,7 @@ import pytest
 pytest.importorskip("agents")
 
 from walter import runtime
+from walter.usage import UsageBudget
 
 
 def test_config_requires_openrouter_key():
@@ -61,9 +62,81 @@ def test_default_models_and_reasoning_context():
     assert config.provider == "openrouter"
     assert config.manager_model == "moonshotai/kimi-k3"
     assert config.worker_model == "moonshotai/kimi-k3"
+    assert config.budget is None
     assert runtime._should_replay_reasoning_content(object(), config.base_url)
     assert not runtime._should_replay_reasoning_content(None, config.base_url)
     assert not runtime._should_replay_reasoning_content(object(), "http://localhost/v1")
+
+
+def test_budget_built_from_optional_env_vars():
+    config = runtime.RuntimeConfig.from_env(
+        {
+            "OPENROUTER_API_KEY": "test",
+            "WALTER_MAX_MODEL_CALLS": "10",
+            "WALTER_MAX_INPUT_TOKENS": "1000",
+            "WALTER_MAX_OUTPUT_TOKENS": "2000",
+            "WALTER_MAX_TOTAL_TOKENS": "3000",
+        }
+    )
+    assert config.budget == UsageBudget(
+        max_calls=10, max_input_tokens=1000, max_output_tokens=2000, max_total_tokens=3000
+    )
+
+
+def test_partial_budget_env_vars_leave_other_limits_unset():
+    config = runtime.RuntimeConfig.from_env(
+        {"OPENROUTER_API_KEY": "test", "WALTER_MAX_MODEL_CALLS": "3"}
+    )
+    assert config.budget == UsageBudget(max_calls=3)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "WALTER_MAX_MODEL_CALLS",
+        "WALTER_MAX_INPUT_TOKENS",
+        "WALTER_MAX_OUTPUT_TOKENS",
+        "WALTER_MAX_TOTAL_TOKENS",
+    ],
+)
+@pytest.mark.parametrize("value", ["abc", "-1", "", "1.5"])
+def test_malformed_budget_env_var_raises_naming_the_variable(name, value):
+    with pytest.raises(runtime.RuntimeConfigurationError, match=name):
+        runtime.RuntimeConfig.from_env({"OPENROUTER_API_KEY": "test", name: value})
+
+
+def test_build_walter_passes_configured_budget_to_manager_model(monkeypatch):
+    from walter.usage_model import UsageRecordingModel
+
+    class Controller:
+        core = object()
+        run_id = "run-test"
+
+        def instructions(self):
+            return "durable instructions"
+
+        def tools(self):
+            return ["durable tool"]
+
+    controller = Controller()
+    manager_model, worker_model = object(), object()
+    budget = UsageBudget(max_calls=7)
+
+    monkeypatch.setattr(
+        runtime.RuntimeConfig,
+        "from_env",
+        classmethod(lambda cls: runtime.RuntimeConfig(
+            "openrouter", "key", "https://openrouter.ai/api/v1", "manager", "worker", budget
+        )),
+    )
+    monkeypatch.setattr(runtime, "build_models", lambda value: (manager_model, worker_model))
+    monkeypatch.setattr(runtime, "_agent", lambda **kwargs: kwargs)
+
+    manager = runtime.build_walter(controller)
+
+    model = manager["model"]
+    assert isinstance(model, UsageRecordingModel)
+    assert model.budget is budget
 
 
 def test_provider_client_is_reused(monkeypatch):

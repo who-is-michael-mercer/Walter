@@ -285,7 +285,8 @@ class DurableController:
         _, model = runtime.build_models(config)
         model = UsageRecordingModel(model, self.core, self.run_id, provider=config.provider,
                                     model=config.worker_model, role=role, task_id=task_id,
-                                    assignment_id=assignment_id, worker_id=worker_id)
+                                    assignment_id=assignment_id, worker_id=worker_id,
+                                    budget=config.budget)
         agent = runtime._agent(name=name, instructions=instructions, output_type=output_type,
                                tools=tools, model=model)
         result = await Runner.run(agent, input=input, max_turns=12,

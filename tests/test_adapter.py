@@ -476,3 +476,39 @@ def test_load_system_prompt_missing_file_raises_runtime_error(monkeypatch, tmp_p
     monkeypatch.setattr("walter.adapter.Path", lambda *_: fake_module)
     with pytest.raises(RuntimeError, match="Walter system prompt not found"):
         load_system_prompt()
+
+
+def test_invoke_passes_configured_budget_to_worker_model(monkeypatch):
+    from walter import runtime
+    from walter.usage import UsageBudget
+    from walter.usage_model import UsageRecordingModel
+
+    controller = controller_for(TaskNode(packet=packet(), required_checks=["result_schema"]))
+    budget = UsageBudget(max_calls=5)
+    captured = {}
+
+    monkeypatch.setattr(
+        runtime.RuntimeConfig,
+        "from_env",
+        classmethod(lambda cls: runtime.RuntimeConfig(
+            "openrouter", "key", "https://openrouter.ai/api/v1", "manager", "worker", budget
+        )),
+    )
+    monkeypatch.setattr(runtime, "build_models", lambda config: (object(), object()))
+    monkeypatch.setattr(runtime, "_agent", lambda **kwargs: captured.update(kwargs) or kwargs)
+
+    class Result:
+        final_output = "ok"
+
+    async def fake_run(*args, **kwargs):
+        return Result()
+
+    monkeypatch.setattr("walter.adapter.Runner.run", fake_run)
+
+    asyncio.run(controller._invoke(
+        name="Worker", instructions="do the task", output_type=str, tools=[],
+        input="payload", task_id="task", worker_id="worker-1", role="worker"))
+
+    model = captured["model"]
+    assert isinstance(model, UsageRecordingModel)
+    assert model.budget is budget

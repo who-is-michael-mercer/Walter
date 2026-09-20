@@ -10,6 +10,7 @@ from agents import Agent, OpenAIChatCompletionsModel, WebSearchTool, set_tracing
 from openai import AsyncOpenAI
 
 from .contracts import ToolPolicy
+from .usage import UsageBudget
 
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -25,6 +26,28 @@ def _normalize_base_url(value: str) -> str:
     return value.strip().rstrip("/")
 
 
+def _optional_non_negative_int(values: Mapping[str, str], name: str) -> int | None:
+    raw = values.get(name)
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
+        raise RuntimeConfigurationError(
+            f"{name} must be a non-negative integer; got an empty value."
+        )
+    try:
+        parsed = int(text)
+    except ValueError:
+        raise RuntimeConfigurationError(
+            f"{name} must be a non-negative integer; got {raw!r}."
+        ) from None
+    if parsed < 0:
+        raise RuntimeConfigurationError(
+            f"{name} must be a non-negative integer; got {raw!r}."
+        )
+    return parsed
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """Provider-neutral runtime settings resolved from the environment."""
@@ -34,6 +57,7 @@ class RuntimeConfig:
     base_url: str
     manager_model: str
     worker_model: str
+    budget: UsageBudget | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "RuntimeConfig":
@@ -69,7 +93,19 @@ class RuntimeConfig:
                 "WALTER_MODEL and WALTER_WORKER_MODEL must both be non-empty."
             )
 
-        return cls(provider, api_key, base_url, manager_model, worker_model)
+        budget_values = {
+            "max_calls": _optional_non_negative_int(values, "WALTER_MAX_MODEL_CALLS"),
+            "max_input_tokens": _optional_non_negative_int(values, "WALTER_MAX_INPUT_TOKENS"),
+            "max_output_tokens": _optional_non_negative_int(values, "WALTER_MAX_OUTPUT_TOKENS"),
+            "max_total_tokens": _optional_non_negative_int(values, "WALTER_MAX_TOTAL_TOKENS"),
+        }
+        budget = (
+            UsageBudget(**budget_values)
+            if any(value is not None for value in budget_values.values())
+            else None
+        )
+
+        return cls(provider, api_key, base_url, manager_model, worker_model, budget)
 
 
 def _should_replay_reasoning_content(context: object, base_url: str) -> bool:
@@ -165,6 +201,7 @@ def build_walter(controller) -> Agent:
     manager_model = UsageRecordingModel(
         manager_model, controller.core, controller.run_id,
         provider=config.provider, model=config.manager_model, role="manager",
+        budget=config.budget,
     )
     return _agent(
         name="Walter",

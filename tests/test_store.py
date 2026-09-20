@@ -1,10 +1,41 @@
 import json
 import sqlite3
+import threading
 import pytest
 from walter.contracts import TaskPacket, WorkerResult
 from walter.models import ApprovalStatus, Event, ModelUsageRecord, TaskNode, TaskStatus
 from walter.orchestration import GateError, Orchestrator
 from walter.store import ConcurrentUpdate, SQLiteStore, SnapshotIncompatible
+
+
+def test_store_is_safe_across_threads(tmp_path):
+    path = tmp_path / "threaded.db"
+    store = SQLiteStore(path)
+    run = Orchestrator(store).create_run("objective", ["criterion"])
+    errors = []
+    result = {}
+
+    def worker():
+        try:
+            loaded = store.load(run.id)
+            loaded.objective = "updated off-thread"
+            result["saved"] = store.save(
+                loaded, [Event(run_id=run.id, kind="test.threaded")], loaded.version)
+            result["loaded"] = store.load(run.id)
+            result["events"] = store.events(run.id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+    assert not errors, errors
+    assert result["saved"].version == run.version + 1
+    assert result["loaded"].objective == "updated off-thread"
+    assert result["events"][-1].kind == "test.threaded"
+    assert [event.sequence for event in result["events"]] == list(
+        range(1, result["loaded"].event_cursor + 1))
+    store.close()
 
 
 def test_durable_reload_and_events(tmp_path):

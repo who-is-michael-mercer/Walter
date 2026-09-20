@@ -45,7 +45,7 @@ class UsageBudget:
 
 def usage_mapping(value: object | None) -> dict[str, object]:
     """Copy provider usage metadata without requiring a provider SDK type."""
-    if isinstance(value, Mapping):
+    if isinstance(value, dict):
         return dict(value)
     if hasattr(value, "model_dump"):
         dumped = value.model_dump()
@@ -53,24 +53,41 @@ def usage_mapping(value: object | None) -> dict[str, object]:
     if hasattr(value, "dict"):
         dumped = value.dict()
         return dict(dumped) if isinstance(dumped, Mapping) else {}
+    if hasattr(value, "__dict__"):
+        return {key: val for key, val in vars(value).items() if not key.startswith("_")}
     return {}
 
 
 def _integer(value: object) -> int | None:
-    if isinstance(value, bool) or value is None:
+    if value is None or isinstance(value, bool):
         return None
-    try:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
         return int(value)
-    except (TypeError, ValueError):
-        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(float(text))
+        except ValueError:
+            return None
+    return None
 
 
 def token_counts(value: object | None) -> tuple[int | None, int | None, int | None]:
     """Return input, output, total counts, preserving unknown values as None."""
     usage = usage_mapping(value)
-    input_tokens = _integer(usage.get("prompt_tokens", usage.get("input_tokens")))
-    output_tokens = _integer(usage.get("completion_tokens", usage.get("output_tokens")))
-    total_tokens = _integer(usage.get("total_tokens", usage.get("total")))
+    input_tokens = _integer(usage.get("prompt_tokens"))
+    if input_tokens is None:
+        input_tokens = _integer(usage.get("input_tokens"))
+    output_tokens = _integer(usage.get("completion_tokens"))
+    if output_tokens is None:
+        output_tokens = _integer(usage.get("output_tokens"))
+    total_tokens = _integer(usage.get("total_tokens"))
+    if total_tokens is None:
+        total_tokens = _integer(usage.get("total"))
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
     return input_tokens, output_tokens, total_tokens

@@ -13,6 +13,7 @@ from .models import (AcceptanceDecision, ApprovalDecision, ApprovalGate, Approva
     ReplanProposal, Review, Run, TaskNode, TaskStatus, WorkerAssignment, WorkerFailure,
     WorkPlan, now)
 from .store import SQLiteStore
+from .usage import token_counts, usage_mapping
 
 
 class GateError(ValueError):
@@ -53,48 +54,12 @@ class Orchestrator:
 
     inspect = get_run
 
-    @staticmethod
-    def _coerce_int(value):
-        if value is None or isinstance(value, bool):
-            return None
-        if isinstance(value, int):
-            return value
-        if isinstance(value, float):
-            return int(value)
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return None
-            try:
-                return int(float(text))
-            except ValueError:
-                return None
-        return None
-
     @classmethod
     def _normalize_usage_record(cls, *, run_id: str, provider: str, model: str, role: str,
             task_id: str | None = None, assignment_id: str | None = None,
             worker_id: str | None = None, raw_usage: object | None = None) -> ModelUsageRecord:
-        mapping = {}
-        if isinstance(raw_usage, dict):
-            mapping = raw_usage
-        elif hasattr(raw_usage, "model_dump"):
-            mapping = raw_usage.model_dump()
-        elif hasattr(raw_usage, "dict"):
-            mapping = raw_usage.dict()
-        elif hasattr(raw_usage, "__dict__"):
-            mapping = {key: value for key, value in vars(raw_usage).items() if not key.startswith("_")}
-        input_tokens = cls._coerce_int(mapping.get("prompt_tokens"))
-        if input_tokens is None:
-            input_tokens = cls._coerce_int(mapping.get("input_tokens"))
-        output_tokens = cls._coerce_int(mapping.get("completion_tokens"))
-        if output_tokens is None:
-            output_tokens = cls._coerce_int(mapping.get("output_tokens"))
-        total_tokens = cls._coerce_int(mapping.get("total_tokens"))
-        if total_tokens is None:
-            total_tokens = cls._coerce_int(mapping.get("total"))
-        if input_tokens is not None and output_tokens is not None and total_tokens is None:
-            total_tokens = input_tokens + output_tokens
+        mapping = usage_mapping(raw_usage)
+        input_tokens, output_tokens, total_tokens = token_counts(mapping)
         if input_tokens is None and output_tokens is None and total_tokens is None:
             usage_known = False
             reason = "Provider did not return token usage data"

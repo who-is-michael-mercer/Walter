@@ -87,7 +87,3 @@ class WorkerResult(BaseModel):
     acceptance_check: list[CriterionCheck] = Field(default_factory=list)
     blocker: str | None = None
     capability_request: CapabilityRequestPayload | None = None
-    specialist_request: str | None = Field(
-        default=None,
-        description="Deprecated compatibility field for an unstructured specialist suggestion.",
-    )

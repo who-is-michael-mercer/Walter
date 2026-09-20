@@ -2,11 +2,14 @@
 import asyncio
 import json
 
+import pytest
 from agents import Runner, set_tracing_disabled
 
 from fakes import message_step, responder_step, scripted_model, tool_step
 from walter import runtime
 from walter.adapter import INITIAL_COMPLETION_CRITERION, DurableController
+from walter.contracts import TaskPacket
+from walter.models import CapabilityProfile, FailureClass, TaskNode, TaskStatus
 from walter.orchestration import Orchestrator
 from walter.store import SQLiteStore
 
@@ -112,4 +115,44 @@ def test_durable_manager_loop_completes_offline(tmp_path, monkeypatch):
 
     manager.assert_complete()
     worker.assert_complete()
+    controller.close()
+
+
+def test_worker_provider_failure_preserves_durable_consistency(tmp_path, monkeypatch):
+    set_tracing_disabled(True)
+    store = SQLiteStore(tmp_path / "operations.db")
+    core = Orchestrator(store)
+    run = core.create_run("Offline demo objective", [INITIAL_COMPLETION_CRITERION])
+    controller = DurableController(core, run.id)
+    controller.set_criteria([CRITERION])
+    core.add_tasks(run.id, [TaskNode(
+        packet=TaskPacket(**PACKET),
+        capability=CapabilityProfile.MODEL_ONLY,
+        required_checks=["result_schema"],
+        review_required=True,
+    )])
+
+    failing_worker = scripted_model([RuntimeError("provider exploded mid-request")])
+    monkeypatch.setattr(runtime.RuntimeConfig, "from_env",
+                        classmethod(lambda cls: _offline_config()))
+    monkeypatch.setattr(runtime, "build_models",
+                        lambda config: (scripted_model([]), failing_worker))
+
+    with pytest.raises(Exception):
+        asyncio.run(controller.delegate("a"))
+
+    final = controller.inspect()
+    task = final.tasks["a"]
+    assert task.status == TaskStatus.FAILED
+    assert final.failures, "no failure recorded for the provider error"
+    failure = final.failures[-1]
+    assert failure.classification == FailureClass.TOOL_FAILURE
+    assert "provider exploded mid-request" in failure.evidence
+
+    kinds = [event.kind for event in store.events(run.id)]
+    assert "assignment.failed" in kinds
+    assert "failure.classified" in kinds
+    # The failed task stays gated until explicit recovery.
+    with pytest.raises(ValueError, match="not eligible"):
+        asyncio.run(controller.delegate("a"))
     controller.close()

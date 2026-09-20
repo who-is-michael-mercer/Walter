@@ -221,11 +221,6 @@ class ApprovalRequest(Model):
     superseded_at: str | None = None
     replacement_id: str | None = None
 
-    @property
-    def reason(self) -> str:
-        """Compatibility alias for pre-lifecycle callers."""
-        return self.rationale
-
 
 class ApprovalDecision(Model):
     model_config = ConfigDict(extra="forbid", frozen=True)

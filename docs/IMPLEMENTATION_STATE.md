@@ -27,7 +27,7 @@ where it is still incomplete.
 
 ## Verified evidence
 
-- Offline suite: `160 passed, 1 skipped`; the skip is the opt-in live provider smoke.
+- Offline suite: `170 passed, 1 skipped`; the skip is the opt-in live provider smoke.
 - Readiness demo passes against real Bubblewrap.
 - Live provider smoke passes (2026-09-20).
 - One live model-driven end-to-end run completed on 2026-09-20 (run
@@ -50,10 +50,12 @@ where it is still incomplete.
 - Only OpenRouter is supported as a provider.
 - The `researcher` profile is unusable with the configured provider (hosted
   `WebSearchTool` rejected by chat completions; verified 2026-09-20).
-- `required_inputs` declared on a task are not registered by the CLI/adapter,
-  which can soft-lock delegation; the delegation-gate error does not name the
-  cause; `replan_tasks` add-path drops capability/checks. See
-  `docs/first-real-run-gap-report.md`.
+- All six findings from `docs/first-real-run-gap-report.md` are resolved:
+  trusted input registration plus plan-time validation; precise delegation-gate
+  errors; capability/check-preserving replan add-path; configurable worker turn
+  budget (`WALTER_WORKER_MAX_TURNS`, default 24); compact tool receipts with
+  `inspect_run` as the full-truth read; placeholder API key rejected at
+  configuration time.
 - Usage budgets are per-run and cumulative across the run's model calls.
 - The Manager loop is currently chatty: a small objective took ~13 Manager model calls.
 - Most root doctrine and all `prompts/`, `protocols/`, `templates/`, `runbooks/`,

@@ -51,7 +51,7 @@ WALTER_MAX_OUTPUT_TOKENS=500000
 WALTER_MAX_TOTAL_TOKENS=1500000
 ```
 
-Each is optional; leave it unset for unlimited. Budgets are per-run and cumulative across the run's model calls. A malformed value (non-integer or negative) fails configuration. When a budget is exhausted the CLI reports the exhaustion cleanly rather than continuing.
+Each is optional; leave it unset for unlimited. Budgets are per-run and cumulative across the run's model calls. A malformed value (non-integer or negative) fails configuration. When a budget is exhausted the CLI reports the exhaustion cleanly rather than continuing. `WALTER_WORKER_MAX_TURNS` optionally sets the worker/reviewer turn budget (default 24). The `.env.example` placeholder key is rejected at configuration time so a misconfigured run cannot start.
 
 ## Use
 

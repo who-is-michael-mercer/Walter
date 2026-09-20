@@ -55,16 +55,13 @@ live in `docs/first-real-run-gap-report.md`.
 
 ## What remains (post-remediation follow-ups, not audit tasks)
 
-From `docs/first-real-run-gap-report.md` — candidates for new operator-reviewed
-tasks, none started:
-
-1. `required_inputs` soft-lock: CLI/adapter never registers target-repo inputs;
-   stuck `PLANNED` tasks cannot be classified; replan is the only route.
-2. Opaque delegation-gate error conflates inputs/readiness/attempts.
-3. `replan_tasks` add-path drops capability and predeclared checks.
-4. Weak non-default workers (DeepSeek/Qwen flash tiers) and worker `max_turns`.
-5. Manager-loop chattiness (~13–28 calls per small objective).
-6. Placeholder `.env` key passes validation and orphans a run on 401.
+All six findings from `docs/first-real-run-gap-report.md` were resolved on
+2026-09-20 (resolutions annotated in the report): trusted input registration +
+plan-time validation; precise delegation-gate errors; capability/check-
+preserving replan add-path; `WALTER_WORKER_MAX_TURNS` (default 24); compact
+tool receipts; placeholder-key rejection. The only non-code residue is worker
+model selection: flash-tier DeepSeek/Qwen workers are not dependable for
+multi-step file work — choose stronger worker models for real objectives.
 
 Standing limitations (documented, not blockers): OpenRouter-only provider;
 `researcher` profile unusable with that provider; Python-only sandbox

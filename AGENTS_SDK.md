@@ -29,7 +29,7 @@ Two SQLite databases have distinct roles:
 - `.local/walter-sessions.db` stores Agents SDK conversation continuity.
 - `.local/walter-operations.db` stores authoritative runs, task graphs, artifacts, decisions, failures, approvals, snapshots, and ordered audit events.
 
-The model must call `inspect_run`, replace the initial sentinel through `set_completion_criteria`, then plan. It proposes work through `plan_tasks`, `delegate_task`, `validate_task`, `review_task`, `accept_task`, `recover_task`, approval-gated `replan_tasks`/`apply_replan`, `request_capability_change`/`apply_capability_change`, generic/current-candidate approval tools, and `finish_run`. Kernel gates remain authoritative.
+The model must call `inspect_run`, replace the initial sentinel through `set_completion_criteria`, then plan. It proposes work through `plan_tasks`, `delegate_task`, `validate_task`, `review_task`, `accept_task`, `recover_task`, approval-gated `replan_tasks`/`apply_replan`, `request_capability_change`/`apply_capability_change`, generic/current-candidate approval tools, and `finish_run`. Repository files intended as declared `required_inputs` are first registered with trusted digests through `register_repository_inputs`; `plan_tasks` rejects unresolvable input declarations. Mutating tools return a compact durable receipt; `inspect_run` remains the full-truth read. Kernel gates remain authoritative and name the precise blocker.
 
 ## Capability profiles
 

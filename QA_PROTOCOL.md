@@ -16,7 +16,7 @@ Submission is assignment-bound: task, assignment ID, and worker ID must match th
 
 ## Trusted checks
 
-The current adapter supports `result_schema`, `compile`, `unittest`, and `pytest`. `result_schema` verifies structured completion and a nonempty deliverable; it is not a claim of substantive quality. Executable checks run through the isolated sandbox and record argv, return code, stdout, and stderr. Zero discovered `unittest` tests do not count as a pass.
+The current adapter supports `result_schema`, `compile`, and `pytest`. `result_schema` verifies structured completion and a nonempty deliverable; it is not a claim of substantive quality. `compile` is Python syntax validation over candidate sources. Executable checks run through the isolated sandbox and record argv, return code, stdout, and stderr. A developer candidate must add or modify at least one `test_*.py`/`*_test.py` file; `pytest` validates only the candidate's changed test files inside the isolated sandbox and fails if none are present.
 
 ## Review policy
 

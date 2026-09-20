@@ -15,6 +15,7 @@
 
 ### Changed
 
+- Scoped developer validation to the candidate's changed/added test files: `pytest` now runs only those files inside the isolated sandbox and requires the candidate to add or modify at least one test file; removed the non-functional `unittest` check.
 - Adopted the Master Blueprint's canonical task lifecycle and acceptance-only dependency semantics throughout executable doctrine and templates.
 - Separated Agents SDK conversation sessions from authoritative operational state and documented the current OpenRouter hosted-web limitation.
 - Guarded new CLI runs with a completion-criteria sentinel, provider preflight, deterministic resource closure, and OS-derived local operator audit identity.

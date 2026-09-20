@@ -31,7 +31,7 @@ One bounded outcome.
 **Forbidden:** agent creation, scope expansion, self-acceptance, ungranted access, external commitment.
 
 If current capability is insufficient, return a structured capability request in the result. Do not attempt the ungranted action.
-If the profile is `developer_sandbox`, required trusted checks below must include `compile`, `unittest`, or `pytest`. This applies to initial plans, replans, and approved capability changes.
+If the profile is `developer_sandbox`, required trusted checks below must include `compile` or `pytest`. This applies to initial plans, replans, and approved capability changes.
 
 ## Deliverable
 
@@ -43,7 +43,7 @@ One inspectable candidate artifact.
 
 ## Required trusted checks and review
 
-- Checks: `result_schema` / `compile` / `unittest` / `pytest`
+- Checks: `result_schema` / `compile` / `pytest`
 - Independent review required: yes/no; rationale.
 
 ## Bounds and stop condition

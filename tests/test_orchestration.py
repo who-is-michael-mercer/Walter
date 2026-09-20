@@ -2,7 +2,7 @@ import pytest
 from walter.contracts import CapabilityRequestPayload, TaskPacket, WorkerResult
 from walter.models import (ApprovalStatus, CapabilityProfile, CapabilityRequestStatus, Event,
     FailureClass, ReplanProposal, TaskNode, TaskStatus)
-from walter.orchestration import GateError, Orchestrator
+from walter.orchestration import (EXECUTABLE_DEVELOPER_CHECKS, GateError, Orchestrator)
 from walter.store import SQLiteStore
 
 
@@ -195,7 +195,9 @@ def test_capability_approval_and_fingerprint(kernel):
 
 def test_developer_sandbox_requires_executable_check_on_initial_plan(kernel):
     core, rid = kernel
-    with pytest.raises(GateError, match="compile, unittest, or pytest"):
+    assert EXECUTABLE_DEVELOPER_CHECKS == frozenset({"compile", "pytest"})
+    assert "unittest" not in EXECUTABLE_DEVELOPER_CHECKS
+    with pytest.raises(GateError, match="compile or pytest"):
         core.add_tasks(rid, [task(capability=CapabilityProfile.DEVELOPER_SANDBOX,
             workspace_id="workspace", required_checks=["result_schema"])])
     assert core.get_run(rid).tasks == {}
@@ -209,7 +211,7 @@ def test_replan_rejects_schema_only_developer_addition_atomically(kernel):
             workspace_id="workspace", required_checks=["result_schema"])])
     core.propose_replan(rid, proposal)
     before = core.get_run(rid)
-    with pytest.raises(GateError, match="compile, unittest, or pytest"):
+    with pytest.raises(GateError, match="compile or pytest"):
         core.apply_replan(rid, proposal.id)
     assert core.get_run(rid) == before
 
@@ -222,7 +224,7 @@ def test_approved_capability_change_cannot_bypass_executable_check(kernel):
         "Approved developer escalation")
     core.decide_approval(rid, approval.id, True, "human", "Approved exact scope")
     before = core.get_run(rid)
-    with pytest.raises(GateError, match="compile, unittest, or pytest"):
+    with pytest.raises(GateError, match="compile or pytest"):
         core.change_capability(rid, "a", CapabilityProfile.DEVELOPER_SANDBOX,
             approval.id, workspace_id="workspace")
     assert core.get_run(rid) == before

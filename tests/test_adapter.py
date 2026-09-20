@@ -12,7 +12,7 @@ from walter.adapter import (DurableController, INITIAL_COMPLETION_CRITERION,
 from walter.contracts import TaskPacket, WorkerResult
 from walter.models import CapabilityProfile, CapabilityRequestStatus, FailureClass, TaskNode
 from walter.orchestration import Orchestrator
-from walter.sandbox import WorkspaceManager
+from walter.sandbox import CommandResult, WorkspaceManager
 from walter.store import SQLiteStore
 from walter.adapter import workspace_tools
 from walter.adapter import load_system_prompt
@@ -35,6 +35,38 @@ def controller_for(task, tmp_path=None):
     run = core.create_run("fixture", ["accepted fixture"])
     core.add_tasks(run.id, [task])
     return DurableController(core, run.id)
+
+
+class RecordingWorkspaceManager(WorkspaceManager):
+    """Exercise the real candidate identity while stubbing the isolation backend."""
+
+    def __init__(self, repository):
+        super().__init__(repository)
+        self.executions = []
+
+    def run_command(self, workspace_id, category, argv, *, worker_id=None, timeout=30):
+        self.inspect_grant(workspace_id, worker_id=worker_id)
+        self.executions.append((workspace_id, category, list(argv), worker_id))
+        return CommandResult(0, "1 passed\n", "")
+
+
+def _developer_pytest_controller(tmp_path):
+    repository = tmp_path / "fixture"
+    repository.mkdir()
+    (repository / "README.md").write_text("# Fixture\n")
+    (repository / "tests").mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repository), "-c", "user.name=Fixture", "-c",
+                    "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], check=True)
+    core = Orchestrator(SQLiteStore())
+    run = core.create_run("scoped pytest", ["A candidate test file passes"])
+    core.add_tasks(run.id, [TaskNode(
+        packet=packet(), capability=CapabilityProfile.DEVELOPER_SANDBOX,
+        required_checks=["pytest"],
+    )])
+    manager = RecordingWorkspaceManager(repository)
+    return DurableController(core, run.id, manager), manager
 
 
 def test_manager_tool_surface_has_no_trust_forging_tools():
@@ -173,6 +205,49 @@ def test_developer_revision_gets_fresh_workspace_and_cleans_old_candidate(tmp_pa
     assert not first_root.exists()
     assert current.tasks["task"].status == "SUBMITTED"
     assert any(event.kind == "workspace.replaced" for event in core.store.events(run.id))
+
+
+def test_developer_candidate_with_changed_test_file_uses_scoped_pytest(tmp_path, monkeypatch):
+    controller, manager = _developer_pytest_controller(tmp_path)
+
+    async def candidate(**kwargs):
+        workspace_id = controller.inspect().tasks[kwargs["task_id"]].workspace_id
+        manager.write_file(workspace_id, "tests/test_candidate.py",
+                           "def test_ok():\n    assert True\n",
+                           worker_id=kwargs["worker_id"])
+        return WorkerResult(task_id="task", status="completed", summary="candidate",
+                            deliverable="bounded candidate")
+
+    monkeypatch.setattr(controller, "_invoke", candidate)
+    asyncio.run(controller.delegate("task"))
+    controller.validate("task")
+    task = controller.inspect().tasks["task"]
+    validation = controller.inspect().artifacts[task.artifact_ids[-1]].validations[-1]
+    assert validation.check == "pytest" and validation.passed
+    argv = manager.executions[-1][2]
+    assert argv[:3] == ["python3", "-m", "pytest"]
+    assert "tests/test_candidate.py" in argv
+    assert "tests" not in argv
+
+
+def test_developer_candidate_without_changed_test_files_fails_validation(tmp_path, monkeypatch):
+    controller, manager = _developer_pytest_controller(tmp_path)
+
+    async def candidate(**kwargs):
+        workspace_id = controller.inspect().tasks[kwargs["task_id"]].workspace_id
+        manager.write_file(workspace_id, "src/module.py", "VALUE = 2\n",
+                           worker_id=kwargs["worker_id"])
+        return WorkerResult(task_id="task", status="completed", summary="candidate",
+                            deliverable="bounded candidate")
+
+    monkeypatch.setattr(controller, "_invoke", candidate)
+    asyncio.run(controller.delegate("task"))
+    controller.validate("task")
+    task = controller.inspect().tasks["task"]
+    validation = controller.inspect().artifacts[task.artifact_ids[-1]].validations[-1]
+    assert validation.check == "pytest" and not validation.passed
+    assert "No candidate test files" in validation.evidence
+    assert manager.executions == []
 
 
 @pytest.mark.parametrize("stale_outcome", ["completion", "error"])

@@ -383,6 +383,22 @@ def test_command_templates_deny_model_chosen_executables_and_arguments(workspace
             manager.run_command(grant.id, category, argv, worker_id="author")
 
 
+def test_pytest_template_accepts_candidate_test_paths_and_denies_traversal(workspace):
+    manager, grant, _ = workspace
+    manager.write_file(grant.id, "tests/test_candidate.py",
+                       "def test_ok():\n    assert True\n", worker_id="author")
+    argv = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider",
+            "tests/test_candidate.py"]
+    assert manager._command(grant, "test", argv) == ["/opt/walter-env/bin/python", *argv[1:]]
+    for path in ("tests/test_missing.py", "../outside.py", "/tmp/evil.py",
+                 "tests/../outside.py"):
+        with pytest.raises(SandboxViolation):
+            manager._command(grant, "test",
+                             ["python", "-m", "pytest", "-q", path])
+    with pytest.raises(SandboxViolation):
+        manager._command(grant, "test", ["python", "-m", "unittest", "discover", "-v"])
+
+
 def test_backend_absence_fails_closed_after_allowed_template(workspace, monkeypatch):
     manager, grant, _ = workspace
     original = Path.is_file

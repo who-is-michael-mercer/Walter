@@ -637,6 +637,26 @@ class WorkspaceManager:
         grant = self._get(workspace_id, worker_id)
         return sorted(name for name, (kind, _, _) in self._inventory(grant).items() if kind == "file")
 
+    def changed_paths(self, workspace_id: str, *, worker_id: str | None = None) -> list[str]:
+        """Return the candidate's added/modified relative paths after grant validation.
+
+        Additions are inventory names absent from the signed base tree; modifications
+        are tracked paths reported by ``git diff --name-only`` against the base
+        revision that still exist in the inventory.  Read-only.
+        """
+        with self._lock:
+            grant = self._get(workspace_id, worker_id)
+            inventory = self._inventory(grant)
+            baseline = {path for path in self._git(
+                "-C", grant.root, "ls-tree", "-r", "--name-only",
+                grant.base_revision).splitlines() if not _excluded(path)}
+            modified = {path for path in self._git(
+                "-C", grant.root, "diff", "--name-only",
+                grant.base_revision).splitlines() if not _excluded(path)}
+            changed = {name for name in inventory if name not in baseline}
+            changed.update(name for name in modified if name in inventory)
+            return sorted(changed)
+
     def inspect_grant(self, workspace_id: str, *,
                       worker_id: str | None = None) -> WorkspaceGrant:
         """Return an immutable copy after validating grant, worker, and worktree binding."""
@@ -686,14 +706,14 @@ class WorkspaceManager:
         if category in {"test", "check"} and len(rest) == 2 and rest[0] == "-c" and rest[1] in AST_CHECK_SNIPPETS:
             return [python, *rest]
         if category == "test" and len(rest) >= 2 and rest[:2] == ["-m", "pytest"]:
-            allowed = {"-q", "-x", "--maxfail=1", "-p", "no:cacheprovider", "tests"}
-            if any(arg not in allowed and not arg.startswith("tests/") for arg in rest[2:]):
+            allowed = {"-q", "-x", "--maxfail=1", "-p", "no:cacheprovider"}
+            inventory = self._inventory(grant)
+            for arg in rest[2:]:
+                if arg in allowed:
+                    continue
+                if _python_source_path(arg) and arg in inventory:
+                    continue
                 raise SandboxViolation("Pytest arguments exceed the manager template")
-            return [python, *rest]
-        if category == "test" and len(rest) >= 2 and rest[:2] == ["-m", "unittest"]:
-            allowed = {"discover", "-v", "-q", "-s", "tests", "."}
-            if any(arg not in allowed and not arg.startswith("test") for arg in rest[2:]):
-                raise SandboxViolation("Unittest arguments exceed the manager template")
             return [python, *rest]
         if category == "build" and len(rest) >= 3 and rest[:2] == ["-m", "py_compile"]:
             sources = rest[2:]

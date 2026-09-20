@@ -20,7 +20,7 @@ class GateError(ValueError):
     pass
 
 
-EXECUTABLE_DEVELOPER_CHECKS = frozenset({"compile", "unittest", "pytest"})
+EXECUTABLE_DEVELOPER_CHECKS = frozenset({"compile", "pytest"})
 
 
 TRANSITIONS = {
@@ -136,7 +136,7 @@ class Orchestrator:
         profile = capability or task.capability
         if (profile == CapabilityProfile.DEVELOPER_SANDBOX and
                 not EXECUTABLE_DEVELOPER_CHECKS.intersection(task.required_checks)):
-            raise GateError("Developer sandbox requires compile, unittest, or pytest validation")
+            raise GateError("Developer sandbox requires compile or pytest validation")
 
     def create_run(self, objective: str, completion_criteria: list[str], *, constraints: list[str] | None = None, max_replans: int = 3) -> Run:
         if not objective.strip() or not all(x.strip() for x in completion_criteria):
